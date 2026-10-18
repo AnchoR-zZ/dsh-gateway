@@ -1,0 +1,25 @@
+# 凭证（机器人 AppID/AppSecret、模型 API key 等，不入库）
+.env
+.env.*
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+
+# 构建产物
+dist/
+build/
+*.tsbuildinfo
+
+# 日志与临时文件
+logs/
+*.log
+tmp/
+.cache/
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
