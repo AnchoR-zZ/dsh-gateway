@@ -1,0 +1,133 @@
+# dsh-gateway bundle patch: 叠加在 @deepseek-ai/dsh-base 之上（后层覆盖，逐行 last-write-wins）。
+# 一个 patch 条目对目标行的 `config` 是整值替换，覆盖时必须重述该行完整 config。
+# 行 id 与 @deepseek-ai/dsh-base 的 cordis.patch.yml 实际行 id 一致；行顺序不承载加载语义。
+
+- insert:
+    - id: dsh-gateway
+      name: dsh-gateway
+
+# ── 保留服务、整值覆盖其 config ─────────────────────────────────────────────
+
+# 审批服务保留，默认策略改为 never：无人值守，需审批的操作确定性拒绝。
+- id: approval
+  config:
+    policy: never
+
+# permission-presets 会用 (sandbox-policy 默认 workspace-write, approval policy=never)
+# 推导默认预设；base 预设表没有 (workspace-write, never) 这一组合，推导落在
+# CUSTOM_PRESET 会使 permission 插件构造抛错。这里整值替换 presets 表：
+# 重述 base 三档原条目（保持原字段），并增补 gateway-unattended 一档承接
+# approval=never 的组合；新建会话据此自动 seed (workspace-write, never)。
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+      gateway-unattended:
+        sandbox: workspace-write
+        approval: never
+
+# 平台对应的一次性 shell：不允许后台执行，超时也不转为后台 job。
+- id: tool-bash
+  config:
+    enableRunInBackground: false
+    promoteOnTimeout: false
+
+- id: tool-pwsh
+  config:
+    enableRunInBackground: false
+    promoteOnTimeout: false
+
+# ── 遥测与动态改配 ──────────────────────────────────────────────────────────
+
+- id: session-telemetry-otel
+  disabled: true
+
+- id: hmr
+  disabled: true
+
+# ── 多轮外部驱动：避免一条消息之外自动产生 turn ─────────────────────────────
+
+- id: goal-round-driver
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: command-goal
+  disabled: true
+
+- id: goal
+  disabled: true
+
+# ── subagent 与 workflow 的服务、驱动和模型工具入口 ─────────────────────────
+
+- id: subagent
+  disabled: true
+
+- id: subagent-spawn-in-process
+  disabled: true
+
+- id: subagent-fork-in-process
+  disabled: true
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  disabled: true
+
+- id: tool-subagent-fork
+  disabled: true
+
+- id: workflow-ptc
+  disabled: true
+
+- id: tool-workflow
+  disabled: true
+
+- id: ptc-runtime
+  disabled: true
+
+# ── 非文本交互：ask-user 的 UI-backed 服务 seam（模型工具 tool-ask-user
+#    不在 base 中，无需另行禁用）────────────────────────────────────────────
+
+- id: user-questions
+  disabled: true
+
+# ── 非闭环能力与模型可调用工具 ──────────────────────────────────────────────
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-working-directory
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: tool-web
+  disabled: true
+
+# 标题的模型调用独立行；session-title 服务保留（词数截断的 fallback 标题）。
+- id: session-title-llm
+  disabled: true
+
+# ── HTTP 远程传输入口：typert registry/loader 基础服务保留，
+#    仅禁远程传输服务端与对非 owner peer 的访问控制 ──────────────────────────
+
+- id: typert-gateway
+  disabled: true
+
+- id: remote-access
+  disabled: true

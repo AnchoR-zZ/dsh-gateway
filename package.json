@@ -1,0 +1,68 @@
+{
+  "name": "dsh-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "description": "QQ 官方机器人 C2C 文本到 dsh agent 的 cordis 插件网关",
+  "packageManager": "pnpm@12.11.2",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-default-model": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "dependencies": {
+    "@tencent-connect/qqbot-nodejs": "1.0.5",
+    "marked": "^18.1.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-default-model": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "@types/node": "^24.19.2",
+    "oxlint": "^1.89.0",
+    "tsdown": "^0.23.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  },
+  "scripts": {
+    "dev": "tsdown --watch",
+    "build": "tsdown",
+    "dev:gateway": "node scripts/gateway.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src tests scripts tsdown.config.ts vitest.config.ts"
+  }
+}

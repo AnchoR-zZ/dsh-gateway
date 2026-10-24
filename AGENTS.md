@@ -21,7 +21,7 @@
 
 ## 凭证安全
 
-聊天平台机器人凭证（如 QQ 的 AppID/AppSecret）、模型 API key 等不入库，统一放 `.env`（保持 git 忽略）并按环境变量读取。
+聊天平台机器人凭证（如 QQ 的 AppID/AppSecret）放 `<DSH_GATEWAY_WORKSPACE>/gateway.config.json`，默认 workspace `~/.dsh-gateway` 位于仓库外；模型 API key 等放 `.env`（保持 git 忽略）并按环境变量读取。两类凭证均不入库，也不得提交；部署方需限制配置文件与 `.env` 的访问权限。
 
 ## 开发与验证
 
@@ -31,6 +31,7 @@
 ## 文档约定
 
 - 项目定位、环境与命令放 [README](README.md)，当前职责、消息流与契约放 [architecture](docs/architecture.md)，重要取舍的依据与结论放 [Notes](docs/notes/README.md)，正文骨架放独立的 [模板](docs/notes/TEMPLATE.md)。
+- 实现前的详细设计、拟定接口与配置、部署草案放 `tmp/`；`docs/architecture.md` 作为当前架构地图，随代码落地同步运行组合、职责、消息流与扩展入口。
 - 每条事实只有一个主出处，其他位置用摘要与链接引用。行为、配置或边界变化时，在同次修改中更新所属文档；文档随实际内容增长再拆分。
 - 新增文档类型前，先确认 README、architecture 与 Notes 是否已能容纳；现有位置放不下时再新增。
 - 只为代码、测试和现有文档不能充分解释的长期取舍写 Note；重要提议可以先记录为 proposed，普通想法、待办和初始化整理无需逐项记录。分类与维护遵守 Notes 约定。

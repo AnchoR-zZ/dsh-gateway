@@ -2,6 +2,9 @@
 .env
 .env.*
 
+# 网关配置文件含 QQ AppSecret；默认 workspace 在仓库外，放在仓库内时也不得提交
+gateway.config.json
+
 # Node
 node_modules/
 npm-debug.log*
@@ -23,3 +26,6 @@ tmp/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 本地任务账本（SDD 简报与报告），不入库
+.superpowers/
