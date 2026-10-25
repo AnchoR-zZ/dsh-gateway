@@ -8,7 +8,9 @@
 
 - `../reference/` 存放只读参考代码，不属于本项目：
   - `../reference/deepseek-harness/` — dsh 源码参考。
+  - `../reference/dsh-qqbot/` — dsh 的 QQ 渠道插件（Cordis 插件）源码参考。
   - `../reference/openclaw-qqbot/` — OpenClaw 的 QQ 渠道插件源码参考。
+  - `../reference/openclaw-weixin/` — OpenClaw 的微信渠道插件源码参考。
 
 ## 参考代码规则
 
