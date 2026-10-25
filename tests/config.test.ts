@@ -3,27 +3,30 @@ import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildGatewayConfig,
+  CHANNEL_APP_ID_MAX_LENGTH,
+  CHANNEL_APP_SECRET_MAX_LENGTH,
   createGatewayConfigTemplate,
   DEFAULT_GATEWAY_WORKSPACE_DIRNAME,
   GATEWAY_CONFIG_SCHEMA_VERSION,
   GatewayConfigError,
   isPathOverlapping,
+  migrateLegacyGatewayConfigDocument,
   parseGatewayConfigDocument,
   resolveGatewayWorkspace,
+  serializeGatewayConfigFile,
 } from '../src/config.js'
 import type { GatewayConfigFile } from '../src/config.js'
 
 /**
- * 纯函数配置测试：workspace 环境变量解析、配置文件文档校验、模板与派生路径。
- * 不触碰文件系统；文件读取/模板创建在 tests/config-file.test.ts。
+ * 纯函数配置测试：workspace 环境变量解析、v2 配置文件文档校验、v1→v2 迁移、模板与派生
+ * 路径。不触碰文件系统；文件读取/模板创建/迁移写回/漂移检测在 tests/config-file.test.ts。
  */
 
 const CONFIG_PATH = 'D:/dsh-gateway/gateway.config.json'
 
 const FILE_DEFAULTS = {
   schemaVersion: GATEWAY_CONFIG_SCHEMA_VERSION,
-  qqAppId: 'app-id',
-  qqAppSecret: 'app-secret',
+  channels: { qq: [{ appId: 'app-id', appSecret: 'app-secret', enabled: true }] },
   debug: false,
   maxConcurrent: 4,
   maxPendingPerPeer: 3,
@@ -36,9 +39,8 @@ const FILE_DEFAULTS = {
 /** 最小合法文档；overrides 可替换任意字段或追加未知字段。 */
 function validDocument(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schemaVersion: 1,
-    qqAppId: 'app-id',
-    qqAppSecret: 'app-secret',
+    schemaVersion: 2,
+    channels: { qq: [{ appId: 'app-id', appSecret: 'app-secret' }] },
     ...overrides,
   }
 }
@@ -125,42 +127,61 @@ describe('resolveGatewayWorkspace', () => {
   })
 })
 
-describe('parseGatewayConfigDocument: valid documents', () => {
+describe('parseGatewayConfigDocument: valid v2 documents', () => {
   it('applies all documented defaults when optional fields are absent', () => {
     const config = parseGatewayConfigDocument(validDocument(), CONFIG_PATH)
     expect(config).toEqual(FILE_DEFAULTS)
     expect(Object.isFrozen(config)).toBe(true)
   })
 
-  it('accepts every provided field and trims the QQ credentials', () => {
+  it('accepts a document without channels (zero instances)', () => {
+    const document = validDocument()
+    delete document.channels
+    const config = parseGatewayConfigDocument(document, CONFIG_PATH)
+    expect(config.channels.qq).toEqual([])
+  })
+
+  it('accepts channels without the qq key (zero instances)', () => {
+    const config = parseGatewayConfigDocument(validDocument({ channels: {} }), CONFIG_PATH)
+    expect(config.channels.qq).toEqual([])
+  })
+
+  it('accepts an empty qq array (zero instances)', () => {
+    const config = parseGatewayConfigDocument(validDocument({ channels: { qq: [] } }), CONFIG_PATH)
+    expect(config.channels.qq).toEqual([])
+  })
+
+  it('accepts multiple instances, trims credentials, and defaults enabled to true', () => {
     const config = parseGatewayConfigDocument(
-      {
-        schemaVersion: 1,
-        qqAppId: '  app-id  ',
-        qqAppSecret: '  app-secret  ',
+      validDocument({
+        channels: {
+          qq: [
+            { appId: '  app-1  ', appSecret: '  secret-1  ' },
+            { appId: 'app-2', appSecret: 'secret-2', enabled: false },
+          ],
+        },
         debug: true,
         maxConcurrent: 8,
-        maxPendingPerPeer: 5,
-        maxPendingTotal: 50,
-        maxPendingBytes: 1_024,
-        idleAgentTtlMs: 1_000,
         maxLiveAgents: 9,
-      },
+      }),
       CONFIG_PATH,
     )
+    expect(config.channels.qq).toEqual([
+      { appId: 'app-1', appSecret: 'secret-1', enabled: true },
+      { appId: 'app-2', appSecret: 'secret-2', enabled: false },
+    ])
+    expect(config.debug).toBe(true)
+    expect(config.maxConcurrent).toBe(8)
+  })
 
-    expect(config).toEqual({
-      schemaVersion: 1,
-      qqAppId: 'app-id',
-      qqAppSecret: 'app-secret',
-      debug: true,
-      maxConcurrent: 8,
-      maxPendingPerPeer: 5,
-      maxPendingTotal: 50,
-      maxPendingBytes: 1_024,
-      idleAgentTtlMs: 1_000,
-      maxLiveAgents: 9,
-    })
+  it('accepts boundary-length credentials', () => {
+    const appId = 'a'.repeat(CHANNEL_APP_ID_MAX_LENGTH)
+    const appSecret = 's'.repeat(CHANNEL_APP_SECRET_MAX_LENGTH)
+    const config = parseGatewayConfigDocument(
+      validDocument({ channels: { qq: [{ appId, appSecret }] } }),
+      CONFIG_PATH,
+    )
+    expect(config.channels.qq[0]).toEqual({ appId, appSecret, enabled: true })
   })
 
   it('accepts the positive boundary 1 and the largest safe integer', () => {
@@ -209,38 +230,140 @@ describe('parseGatewayConfigDocument: root and schemaVersion', () => {
     )
   })
 
-  it.each([2, 0, '1', null, true])('rejects unsupported schemaVersion %j', (value) => {
+  it.each([1, 3, 0, '2', null, true])('rejects unsupported schemaVersion %j', (value) => {
     expect(() =>
       parseGatewayConfigDocument(validDocument({ schemaVersion: value }), CONFIG_PATH),
     ).toThrow(GatewayConfigError)
     expect(() =>
       parseGatewayConfigDocument(validDocument({ schemaVersion: value }), CONFIG_PATH),
-    ).toThrow(/schemaVersion must be 1; unsupported version/)
+    ).toThrow(/schemaVersion must be 2; unsupported version/)
   })
 })
 
-describe('parseGatewayConfigDocument: required QQ credentials', () => {
-  it.each(['qqAppId', 'qqAppSecret'] as const)('rejects a missing %s', (field) => {
-    const document = validDocument()
-    delete document[field]
-    expect(() => parseGatewayConfigDocument(document, CONFIG_PATH)).toThrow(
-      new RegExp(`${field} must be a non-empty string`),
+describe('parseGatewayConfigDocument: channels and instances', () => {
+  it('rejects the weixin channel type with a not-supported message', () => {
+    expect(() =>
+      parseGatewayConfigDocument(validDocument({ channels: { qq: [], weixin: [] } }), CONFIG_PATH),
+    ).toThrow(GatewayConfigError)
+    expect(() =>
+      parseGatewayConfigDocument(validDocument({ channels: { qq: [], weixin: [] } }), CONFIG_PATH),
+    ).toThrow(/unknown channel type "weixin"; only "qq" is supported \(weixin is not supported yet\)/)
+  })
+
+  it('rejects any other unknown channel type', () => {
+    expect(() =>
+      parseGatewayConfigDocument(validDocument({ channels: { telegram: [] } }), CONFIG_PATH),
+    ).toThrow(/unknown channel type "telegram"/)
+  })
+
+  it('rejects non-object channels and non-array qq', () => {
+    expect(() => parseGatewayConfigDocument(validDocument({ channels: [] }), CONFIG_PATH)).toThrow(
+      /channels must be an object/,
+    )
+    expect(() => parseGatewayConfigDocument(validDocument({ channels: { qq: {} } }), CONFIG_PATH)).toThrow(
+      /channels.qq must be an array/,
+    )
+    expect(() => parseGatewayConfigDocument(validDocument({ channels: { qq: 'x' } }), CONFIG_PATH)).toThrow(
+      /channels.qq must be an array/,
     )
   })
 
-  it.each(['qqAppId', 'qqAppSecret'] as const)('rejects invalid %s values', (field) => {
-    for (const value of ['', '   ', '\t\n', null, 1, false, {}, []]) {
+  it('rejects malformed instances', () => {
+    expect(() =>
+      parseGatewayConfigDocument(validDocument({ channels: { qq: ['x'] } }), CONFIG_PATH),
+    ).toThrow(/channels.qq\[0\] must be an object/)
+    expect(() =>
+      parseGatewayConfigDocument(validDocument({ channels: { qq: [null] } }), CONFIG_PATH),
+    ).toThrow(/channels.qq\[0\] must be an object/)
+  })
+
+  it('rejects unknown instance fields', () => {
+    expect(() =>
+      parseGatewayConfigDocument(
+        validDocument({ channels: { qq: [{ appId: 'a', appSecret: 's', label: 'bot' }] } }),
+        CONFIG_PATH,
+      ),
+    ).toThrow(/channels.qq\[0\] unknown field "label"/)
+  })
+
+  it.each(['appId', 'appSecret'] as const)('rejects a missing or blank %s', (field) => {
+    for (const value of [undefined, '', '   ', '\t\n', null, 1, false, {}, []]) {
       expect(
-        () => parseGatewayConfigDocument(validDocument({ [field]: value }), CONFIG_PATH),
+        () =>
+          parseGatewayConfigDocument(
+            validDocument({
+              channels: { qq: [{ appId: 'app-id', appSecret: 'app-secret', [field]: value }] },
+            }),
+            CONFIG_PATH,
+          ),
         `${field}=${JSON.stringify(value)}`,
       ).toThrow(new RegExp(`${field} must be a non-empty string`))
     }
   })
+
+  it('rejects over-length credentials', () => {
+    expect(() =>
+      parseGatewayConfigDocument(
+        validDocument({
+          channels: { qq: [{ appId: 'a'.repeat(CHANNEL_APP_ID_MAX_LENGTH + 1), appSecret: 's' }] },
+        }),
+        CONFIG_PATH,
+      ),
+    ).toThrow(new RegExp(`appId must be at most ${CHANNEL_APP_ID_MAX_LENGTH} characters`))
+    expect(() =>
+      parseGatewayConfigDocument(
+        validDocument({
+          channels: { qq: [{ appId: 'a', appSecret: 's'.repeat(CHANNEL_APP_SECRET_MAX_LENGTH + 1) }] },
+        }),
+        CONFIG_PATH,
+      ),
+    ).toThrow(new RegExp(`appSecret must be at most ${CHANNEL_APP_SECRET_MAX_LENGTH} characters`))
+  })
+
+  it('rejects a non-boolean enabled', () => {
+    for (const value of ['true', 1, 0, null, {}]) {
+      expect(() =>
+        parseGatewayConfigDocument(
+          validDocument({ channels: { qq: [{ appId: 'a', appSecret: 's', enabled: value }] } }),
+          CONFIG_PATH,
+        ),
+      ).toThrow(/enabled must be a boolean/)
+    }
+  })
+
+  it('rejects duplicate appIds within the qq array', () => {
+    expect(() =>
+      parseGatewayConfigDocument(
+        validDocument({
+          channels: { qq: [{ appId: 'dup', appSecret: 'a' }, { appId: 'dup', appSecret: 'b' }] },
+        }),
+        CONFIG_PATH,
+      ),
+    ).toThrow(/duplicate channels.qq appId "dup"/)
+  })
+
+  it('rejects appIds outside the binding-scope charset, accepts letters/digits/hyphens', () => {
+    for (const appId of ['bad_app', 'app.id', 'app id', '应用', 'app/1']) {
+      expect(
+        () =>
+          parseGatewayConfigDocument(
+            validDocument({ channels: { qq: [{ appId, appSecret: 's' }] } }),
+            CONFIG_PATH,
+          ),
+        appId,
+      ).toThrow(/appId must only contain \[A-Za-z0-9-\] characters/)
+    }
+    const valid = parseGatewayConfigDocument(
+      validDocument({ channels: { qq: [{ appId: 'App-01-x', appSecret: 's' }] } }),
+      CONFIG_PATH,
+    )
+    expect(valid.channels.qq[0]!.appId).toBe('App-01-x')
+  })
 })
 
 describe('parseGatewayConfigDocument: unknown fields and types', () => {
-  it('rejects unknown fields, including old configuration names', () => {
-    for (const field of ['extra', 'stateDir', 'workspaceRoot', 'dshHome']) {
+  it('rejects unknown fields, including v1 credential names', () => {
+    for (const field of ['extra', 'stateDir', 'workspaceRoot', 'dshHome', 'qqAppId', 'qqAppSecret']) {
       expect(() =>
         parseGatewayConfigDocument(validDocument({ [field]: true }), CONFIG_PATH),
       ).toThrow(`${CONFIG_PATH}: unknown field "${field}"`)
@@ -297,11 +420,12 @@ describe('parseGatewayConfigDocument: credential privacy', () => {
   it.each([
     ['invalid integer', { maxConcurrent: 1.5 }],
     ['unknown field', { extra: true }],
-    ['blank app id', { qqAppId: '   ' }],
+    ['blank app id', { channels: { qq: [{ appId: '   ', appSecret: secret }] } }],
+    ['unknown channel type', { channels: { weixin: [] } }],
     ['invalid debug', { debug: 'yes' }],
-  ])('never includes qqAppSecret in errors for %s', (_label, overrides) => {
+  ])('never includes the appSecret value in errors for %s', (_label, overrides) => {
     try {
-      parseGatewayConfigDocument(validDocument({ qqAppSecret: secret, ...overrides }), CONFIG_PATH)
+      parseGatewayConfigDocument(validDocument({ ...overrides }), CONFIG_PATH)
       expect.unreachable('expected GatewayConfigError')
     } catch (error) {
       expect(error).toBeInstanceOf(GatewayConfigError)
@@ -320,13 +444,102 @@ describe('parseGatewayConfigDocument: credential privacy', () => {
   })
 })
 
+describe('migrateLegacyGatewayConfigDocument (v1 -> v2)', () => {
+  it('converts a valid v1 document into one enabled qq instance', () => {
+    const migrated = migrateLegacyGatewayConfigDocument(
+      {
+        schemaVersion: 1,
+        qqAppId: 'legacy-app',
+        qqAppSecret: 'legacy-secret',
+        debug: true,
+        maxConcurrent: 7,
+        maxLiveAgents: 9,
+      },
+      CONFIG_PATH,
+    )
+    expect(migrated).toEqual({
+      schemaVersion: 2,
+      channels: { qq: [{ appId: 'legacy-app', appSecret: 'legacy-secret', enabled: true }] },
+      debug: true,
+      maxConcurrent: 7,
+      maxPendingPerPeer: 3,
+      maxPendingTotal: 100,
+      maxPendingBytes: 8_388_608,
+      idleAgentTtlMs: 900_000,
+      maxLiveAgents: 9,
+    })
+  })
+
+  it('converts a v1 template with both credentials blank into zero qq instances', () => {
+    for (const document of [
+      { schemaVersion: 1, qqAppId: '', qqAppSecret: '', debug: true, maxConcurrent: 7, maxLiveAgents: 9 },
+      { schemaVersion: 1, qqAppId: '  ', qqAppSecret: ' \t ' },
+    ]) {
+      const migrated = migrateLegacyGatewayConfigDocument(document, CONFIG_PATH)
+      expect(migrated).toMatchObject({ schemaVersion: 2, channels: { qq: [] } })
+    }
+  })
+
+  it('rejects a v1 document with exactly one blank credential', () => {
+    expect(() =>
+      migrateLegacyGatewayConfigDocument({ schemaVersion: 1, qqAppId: '  ', qqAppSecret: 's' }, CONFIG_PATH),
+    ).toThrow(/qqAppId must be a non-empty string/)
+    expect(() =>
+      migrateLegacyGatewayConfigDocument({ schemaVersion: 1, qqAppId: 'a', qqAppSecret: ' ' }, CONFIG_PATH),
+    ).toThrow(/qqAppSecret must be a non-empty string/)
+  })
+
+  it('rejects a v1 document with blank or missing credentials', () => {
+    for (const document of [
+      { schemaVersion: 1, qqAppId: '', qqAppSecret: 's' },
+      { schemaVersion: 1, qqAppId: 'a' },
+      { schemaVersion: 1 },
+    ]) {
+      expect(() => migrateLegacyGatewayConfigDocument(document, CONFIG_PATH)).toThrow(
+        GatewayConfigError,
+      )
+    }
+  })
+
+  it('rejects a v1 document with unknown fields', () => {
+    expect(() =>
+      migrateLegacyGatewayConfigDocument(
+        { schemaVersion: 1, qqAppId: 'a', qqAppSecret: 's', extra: true },
+        CONFIG_PATH,
+      ),
+    ).toThrow(/unknown field "extra"/)
+  })
+
+  it('rejects a v1 qqAppId outside the binding-scope charset before writing back', () => {
+    expect(() =>
+      migrateLegacyGatewayConfigDocument(
+        { schemaVersion: 1, qqAppId: 'legacy_app', qqAppSecret: 's' },
+        CONFIG_PATH,
+      ),
+    ).toThrow(/qqAppId must only contain \[A-Za-z0-9-\] characters/)
+  })
+
+  it('rejects non-v1 schemaVersion values', () => {
+    expect(() =>
+      migrateLegacyGatewayConfigDocument(
+        { schemaVersion: 2, qqAppId: 'a', qqAppSecret: 's' },
+        CONFIG_PATH,
+      ),
+    ).toThrow(/must be 1 for legacy migration/)
+  })
+})
+
 describe('buildGatewayConfig', () => {
-  it('derives stateDir and workspaceRoot from the workspace and copies file fields', () => {
+  it('derives stateDir/workspaceRoot, copies scalar fields, and exposes qqInstances', () => {
     const workspaceDir = join(tmpdir(), 'dsh-gateway-workspace')
     const file: GatewayConfigFile = {
-      schemaVersion: 1,
-      qqAppId: 'app-id',
-      qqAppSecret: 'app-secret',
+      schemaVersion: 2,
+      channels: {
+        qq: [
+          { appId: 'app-1', appSecret: 'secret-1', enabled: true },
+          { appId: 'app-2', appSecret: 'secret-2', enabled: false },
+        ],
+      },
       debug: true,
       maxConcurrent: 6,
       maxPendingPerPeer: 2,
@@ -341,8 +554,10 @@ describe('buildGatewayConfig', () => {
     expect(config).toEqual({
       stateDir: join(workspaceDir, 'state'),
       workspaceRoot: join(workspaceDir, 'users'),
-      qqAppId: 'app-id',
-      qqAppSecret: 'app-secret',
+      qqInstances: [
+        { appId: 'app-1', appSecret: 'secret-1', enabled: true },
+        { appId: 'app-2', appSecret: 'secret-2', enabled: false },
+      ],
       debug: true,
       maxConcurrent: 6,
       maxPendingPerPeer: 2,
@@ -355,14 +570,13 @@ describe('buildGatewayConfig', () => {
   })
 })
 
-describe('createGatewayConfigTemplate', () => {
-  it('renders the full default document with blank QQ credentials', () => {
+describe('createGatewayConfigTemplate and serializeGatewayConfigFile', () => {
+  it('renders the v2 default document with an empty qq array', () => {
     expect(createGatewayConfigTemplate()).toBe(
       `${JSON.stringify(
         {
-          schemaVersion: 1,
-          qqAppId: '',
-          qqAppSecret: '',
+          schemaVersion: 2,
+          channels: { qq: [] },
           debug: false,
           maxConcurrent: 4,
           maxPendingPerPeer: 3,
@@ -377,19 +591,18 @@ describe('createGatewayConfigTemplate', () => {
     )
   })
 
-  it('is parseable JSON with a trailing newline and no BOM', () => {
+  it('is parseable v2 JSON with a trailing newline and no BOM', () => {
     const text = createGatewayConfigTemplate()
     expect(text.endsWith('\n')).toBe(true)
     expect(text.startsWith('\uFEFF')).toBe(false)
-    expect(text.startsWith('{\n  "schemaVersion": 1,')).toBe(true)
-    expect(JSON.parse(text)).toMatchObject({
-      schemaVersion: 1,
-      qqAppId: '',
-      qqAppSecret: '',
-      debug: false,
-      maxConcurrent: 4,
-      maxLiveAgents: 32,
-    })
+    expect(text.startsWith('{\n  "schemaVersion": 2,')).toBe(true)
+    expect(parseGatewayConfigDocument(JSON.parse(text), CONFIG_PATH).channels.qq).toEqual([])
+  })
+
+  it('serializeGatewayConfigFile roundtrips through the parser', () => {
+    const parsed = parseGatewayConfigDocument(validDocument(), CONFIG_PATH)
+    const text = serializeGatewayConfigFile(parsed)
+    expect(parseGatewayConfigDocument(JSON.parse(text), CONFIG_PATH)).toEqual(parsed)
   })
 })
 

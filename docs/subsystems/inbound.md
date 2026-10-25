@@ -1,12 +1,12 @@
 # 入站与 QQ 连接
 
-本页描述 QQ 渠道的 SDK 组装、连接生命周期与状态映射、入站纯过滤、被动回复窗口，以及渠道侧拒绝提示的发送归属；core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示文案、回复规划与投递见 [回复规划与投递](outbound.md#notice-order)，健康判定见 [健康探针](../observability.md#readiness)，日志字段见 [日志事件](../observability.md#log-events)。源码：[`src/qq/index.ts`](../../src/qq/index.ts)、[`src/qq/inbound.ts`](../../src/qq/inbound.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
+本页描述 QQ 渠道的 SDK 组装、连接生命周期与状态映射、入站纯过滤、被动回复窗口，以及渠道侧拒绝提示的发送归属；实例的按配置拉起、替换重启与管理命令见 [channel 管理](channel-admin.md)，core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示文案、回复规划与投递见 [回复规划与投递](outbound.md#notice-order)，健康判定见 [健康探针与管理路由](../observability.md#readiness)，日志字段见 [日志事件](../observability.md#log-events)。源码：[`src/qq/index.ts`](../../src/qq/index.ts)、[`src/qq/inbound.ts`](../../src/qq/inbound.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
 
 <a id="qq-connection"></a>
 
 ## QQ 连接与生命周期
 
-渠道由插件入口构造，并在 core 启动后调用 `qq.start()` 注册与连接；`qq.start()` 的启动拒绝由入口记录 `manual_restart_required` 并停止 core 与渠道，启动顺序与资源回收见 [宿主接入](../architecture.md#host-integration)。
+渠道实例由实例管理器按配置构造（每个 `enabled` 实例一份，`accountId = appId`），并在 core 启动后调用 `qq.start()` 注册与连接；单个实例启动失败只记 `manual_restart_required` 并置 `blocked`，不影响其他实例与 core，恢复方式是重跑 `dsh-gateway channel enable qq`（替换为新实例）或重启进程。启动顺序与资源回收见 [宿主接入](../architecture.md#host-integration) 与 [实例管理器](channel-admin.md#channel-manager)。
 
 `start()` 首次调用按下列顺序装配；同一实例之后再次调用 `start()` 直接返回，无论前一次是成功、进行中还是失败终局，重启必须使用新实例。
 
@@ -26,7 +26,7 @@ SDK 构造参数如下：
 
 | 参数 | 取值 | 说明 |
 |---|---|---|
-| `appId` / `appSecret` | `gateway.config.json` 的 `qqAppId` / `qqAppSecret` | 配置字段与校验见 [配置](../config.md#config-fields) |
+| `appId` / `appSecret` | 配置实例的 `appId` / `appSecret`（`channels.qq[<i>]`） | 配置字段与校验见 [配置](../config.md#config-fields) |
 | `intents` | `1 << 25` | SDK 中 C2C 与群消息共用的 intents 位；群消息在入站过滤第一步被拒 |
 | `markdownSupport` | `true` | 启用 Markdown 发送 |
 | `transport` | `'websocket'` | WebSocket 传输 |
@@ -37,7 +37,7 @@ SDK 自身日志不进入 `GatewayLogEvent` 联合，也不受 `debug` 开关控
 
 `bot.start()` 是挂起到 `stop()` 的长运行 Promise，渠道给它挂上拒绝处理器后立即返回。启动拒绝发生在 `start()` 返回之后，不会抛给入口：渠道记录 `manual_restart_required` 并上报 `blocked`，`GatewayErrorCode.FATAL_CLOSE` 与 `GatewayErrorCode.RETRY_EXHAUSTED` 保留错误码，其他启动失败保留 SDK 错误消息；同实例不重试，core 保持运行而 readiness 因渠道非 `online` 返回 503（见 [健康探针](../observability.md#readiness)）。若 `bot.start()` 在渠道未进入停止流程时自行 resolve，渠道记录 `shutdown` 并把内部状态置 `stopped`。
 
-`stop()` 幂等：首次调用把内部状态置 `stopping`，执行与注册时提供的 `stopReceiving()` 相同的停止流程，同步调用 `bot.stop()`（抛错只记 `state_warning`），再在 `DISPOSE_WAIT_MS`（5,000 ms）内等待在途入站处理；随后以同一上限等待后台 `bot.start()` 收敛。两个等待超时都只结束等待、不强制中断，剩余在途处理自行收尾。`stopReceiving()` 与 `stop()` 复用同一份 bot 停止与在途处理等待逻辑，重复调用幂等；注册失败、尚未构造 bot 时调用 `stop()` 不产生 bot 调用。
+`stop()` 幂等：首次调用把内部状态置 `stopping`，执行与注册时提供的 `stopReceiving()` 相同的停止流程，同步调用 `bot.stop()`（抛错只记 `state_warning`），再在 `DISPOSE_WAIT_MS`（5,000 ms）内等待在途入站处理；随后以同一上限等待后台 `bot.start()` 收敛，最后经 `ingress.disconnect()` 从 core 注销本实例（丢其排队任务、中断其运行中执行，不影响其他实例）。两个等待超时都只结束等待、不强制中断，剩余在途处理自行收尾。`stopReceiving()` 与 `stop()` 复用同一份 bot 停止与在途处理等待逻辑，重复调用幂等；注册失败、尚未构造 bot 时调用 `stop()` 不产生 bot 调用、不触发 disconnect。
 
 SDK 事件与终止条件的映射如下；渠道只上报状态，不自行重连，重连由 SDK 负责。渠道状态集合与允许迁移见 [状态机](../observability.md#state-machines)。
 
@@ -54,7 +54,7 @@ SDK 事件与终止条件的映射如下；渠道只上报状态，不自行重�
 
 出站隔离生效后，`ready`、`resumed`、`error` 与 `disconnected` 都不再改变状态，`blocked` 保持不变；隔离语义见 [出站隔离](outbound.md#outbound-isolation)。
 
-`blocked` 的判定权在渠道：永久断连、`bot.start()` 失败与出站隔离记录 `manual_restart_required` 后上报该状态；这些异步失败由渠道消化，不会让 `qq.start()` 拒绝，注册失败则会使 `qq.start()` 拒绝并由入口记录后停止 core 与渠道。core 收到 `blocked` 后同样记录该事件并保持 readiness 不可用，完整触发点与字段见 [日志事件](../observability.md#log-events)。恢复需要人工重启，渠道不自动重建连接。
+`blocked` 的判定权在渠道：永久断连、`bot.start()` 失败与出站隔离记录 `manual_restart_required` 后上报该状态；这些异步失败由渠道消化，不会让 `qq.start()` 拒绝，注册失败则会使 `qq.start()` 拒绝并由实例管理器记录（只影响该实例）。core 收到 `blocked` 后同样记录该事件并保持 readiness 不可用，完整触发点与字段见 [日志事件](../observability.md#log-events)。恢复方式是重跑 `dsh-gateway channel enable qq`（替换为新实例）或重启进程，渠道实例自身不自动重建连接（SDK 内部重连除外）。
 
 <a id="inbound-filter"></a>
 

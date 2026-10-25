@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { connect, type AddressInfo } from 'node:net'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,7 +18,7 @@ import type {
   ReplyEnvelope,
   ReplyPort,
 } from '../src/contracts.js'
-import type { GatewayConfig } from '../src/config.js'
+import type { GatewayConfig, QQChannelInstance } from '../src/config.js'
 import { createGatewayLogger } from '../src/logging.js'
 import { createScheduler } from '../src/core/scheduler.js'
 import { createDefaultStateStoreIo, createStateStore } from '../src/core/state-store.js'
@@ -247,12 +247,15 @@ interface Harness {
   port: number
 }
 
-function makeConfig(stateDir: string, workspaceRoot: string): GatewayConfig {
+function makeConfig(
+  stateDir: string,
+  workspaceRoot: string,
+  qqInstances: readonly QQChannelInstance[] = [],
+): GatewayConfig {
   return {
     stateDir,
     workspaceRoot,
-    qqAppId: 'app-1',
-    qqAppSecret: 'secret-value',
+    qqInstances,
     debug: false,
     maxConcurrent: 4,
     maxPendingPerPeer: 3,
@@ -281,6 +284,7 @@ async function makeHarness(options?: {
   limits?: Partial<CoreLimits>
   port?: number
   store?: StateStore
+  qqInstances?: readonly QQChannelInstance[]
 }): Promise<Harness> {
   const stateDir = await mkdtemp(join(tmpdir(), 'dsh-core-state-'))
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'dsh-core-ws-'))
@@ -310,7 +314,7 @@ async function makeHarness(options?: {
   let reqSeq = 0
   const port = options?.port ?? (await reservePort())
   const handle = createGatewayCore({
-    config: makeConfig(stateDir, workspaceRoot),
+    config: makeConfig(stateDir, workspaceRoot, options?.qqInstances),
     limits,
     logger,
     store,
@@ -730,20 +734,88 @@ describe('core assembly (T9)', () => {
     expect(await live.json()).toEqual({ status: 'ok' })
     expect((await fetch(`${base}/nope`)).status).toBe(404)
 
+    // 零实例（配置与注册表皆空）：not_configured 且整体 ready。
+    const empty = await fetch(`${base}/readyz`)
+    expect(empty.status).toBe(200)
+    expect(((await empty.json()) as { channels: Record<string, string> }).channels).toEqual({
+      qq: 'not_configured',
+    })
+
     // 渠道 connecting → 503
     const ingress = h.handle.core.registerChannel(new FakeChannel())
     expect((await fetch(`${base}/readyz`)).status).toBe(503)
 
-    // online → 200，正文键集合与渠道表（无 AppID）
+    // online → 200，正文键集合与实例粒度渠道表（键 qq:<appId>）
     ingress.setState('online')
     const ready = await fetch(`${base}/readyz`)
     expect(ready.status).toBe(200)
     const body = (await ready.json()) as Record<string, unknown>
     expect(Object.keys(body).sort()).toEqual(['channels', 'coreState', 'pending', 'running', 'startedAt'])
     expect(body.coreState).toBe('ready')
-    expect(body.channels).toEqual({ qq: 'online' })
+    expect(body.channels).toEqual({ 'qq:app-1': 'online' })
     expect(body.startedAt).toBeTruthy()
-    expect(JSON.stringify(body)).not.toContain('app-1')
+  })
+
+  it('健康渠道表：disabled 实例不参与 ready 判定，enabled 未注册实例回落 blocked', async () => {
+    const h = await makeHarness({
+      qqInstances: [
+        { appId: 'app-1', appSecret: 's1', enabled: true },
+        { appId: 'app-2', appSecret: 's2', enabled: false },
+      ],
+    })
+    await h.handle.start()
+    // app-1 已启用但尚未注册 → blocked；app-2 disabled → 不影响 ready。
+    expect(h.handle.health().channelStates).toEqual({ 'qq:app-1': 'blocked', 'qq:app-2': 'disabled' })
+    expect((await fetch(`http://127.0.0.1:${h.port}/readyz`)).status).toBe(503)
+
+    const ingress = h.handle.core.registerChannel(new FakeChannel('qq', 'app-1'))
+    ingress.setState('online')
+    expect(h.handle.health().channelStates).toEqual({
+      'qq:app-1': 'online',
+      'qq:app-2': 'disabled',
+    })
+    const ready = await fetch(`http://127.0.0.1:${h.port}/readyz`)
+    expect(ready.status).toBe(200)
+    expect(((await ready.json()) as { channels: Record<string, string> }).channels).toEqual({
+      'qq:app-1': 'online',
+      'qq:app-2': 'disabled',
+    })
+  })
+
+  it('currentQQInstances 动态反映管理面保存后的实例清单', async () => {
+    let current: readonly QQChannelInstance[] = []
+    const stateDir = await mkdtemp(join(tmpdir(), 'dsh-core-dyn-'))
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'dsh-core-dyn-ws-'))
+    const logs: LogLine[] = []
+    const logger = createGatewayLogger({ debug: false, sink: (line) => logs.push(JSON.parse(line) as LogLine) })
+    const store = createStateStore({ stateDir, limits: GATEWAY_LIMITS, logger })
+    const sessions = new FakeSessions([])
+    const runner = new FakeRunner([])
+    const port = await reservePort()
+    const handle = createGatewayCore({
+      config: makeConfig(stateDir, workspaceRoot, current),
+      limits: { ...GATEWAY_LIMITS },
+      logger,
+      store,
+      createScheduler: (callbacks) =>
+        createScheduler({
+          config: { maxConcurrent: 4, maxPendingPerPeer: 3, maxPendingTotal: 100, maxPendingBytes: 8_388_608 },
+          limits: { ...GATEWAY_LIMITS } as unknown as typeof GATEWAY_LIMITS,
+          logger,
+          callbacks,
+        }),
+      sessions,
+      runner,
+      health: { host: '127.0.0.1', port },
+      currentQQInstances: () => current,
+    })
+    await handle.start()
+    expect(handle.health().channelStates).toEqual({ qq: 'not_configured' })
+    current = [{ appId: 'hot-app', appSecret: 's', enabled: true }]
+    expect(handle.health().channelStates).toEqual({ 'qq:hot-app': 'blocked' })
+    current = [{ appId: 'hot-app', appSecret: 's', enabled: false }]
+    expect(handle.health().channelStates).toEqual({ 'qq:hot-app': 'disabled' })
+    await handle.stop()
   })
 
   it('readyz：store 转 failed → 503（core failed）', async () => {
@@ -853,31 +925,215 @@ describe('core assembly (T9)', () => {
     }
   })
 
-  it('disconnect：旧 ingress 失效、队列丢弃、渠道停收、活动 run 被中断', async () => {
+  it('disconnect：旧 ingress 失效、该实例队列丢弃与运行中断，其他实例继续收发', async () => {
     const h = await makeHarness()
-    const { ingress, channel } = await startWithChannel(h)
+    await h.handle.start()
+    const ingress1 = h.handle.core.registerChannel(new FakeChannel('qq', 'app-1'))
+    ingress1.setState('online')
+    const ingress2 = h.handle.core.registerChannel(new FakeChannel('qq', 'app-2'))
+    ingress2.setState('online')
+
     h.sessions.prepareImpl = (_identity, signal) =>
       new Promise<PrepareResult>((resolve) => {
         signal.addEventListener('abort', () => resolve({ error: { kind: 'aborted' } }))
       })
-    const { message, port } = makeMessage('d1')
-    await ingress.inbound(message)
-    await waitFor(() => h.sessions.prepareCalls.length === 1)
-    const queued = makeMessage('d2')
-    await ingress.inbound(queued.message)
+    const m1 = makeMessage('d1', { peerId: 'peer-1' })
+    await ingress1.inbound(m1.message)
+    const m2 = makeMessage('d2', { peerId: 'peer-2' })
+    await ingress2.inbound(m2.message)
+    await waitFor(() => h.sessions.prepareCalls.length === 2)
+    // q1/q2 分别排到各自实例正在执行的同 peer FIFO 后（保持 pending 状态）。
+    const queued1 = makeMessage('q1', { messageId: 'q-1', peerId: 'peer-1' })
+    await ingress1.inbound(queued1.message)
+    const queued2 = makeMessage('q2', { messageId: 'q-2', peerId: 'peer-2' })
+    await ingress2.inbound(queued2.message)
+    expect(h.handle.health().pending).toBe(2)
 
-    await ingress.disconnect()
-    expect(channel.stopCalls).toBe(1)
-    await waitFor(() => port.closed && queued.port.closed)
-    expect(port.envelopes).toHaveLength(0)
-    expect(queued.port.envelopes).toHaveLength(0)
-    // 旧 ingress 失效：后续 inbound 拒绝
-    const stale = await ingress.inbound(makeMessage('d3').message)
+    await ingress1.disconnect()
+
+    // app-1：排队任务被丢弃（仅关闭 port），运行中的执行被中断。
+    await waitFor(() => m1.port.closed && queued1.port.closed)
+    expect(m1.port.envelopes).toHaveLength(0)
+    expect(queued1.port.envelopes).toHaveLength(0)
+    // 旧 ingress 失效：后续 inbound 拒绝。
+    const stale = await ingress1.inbound(makeMessage('d3').message)
     expect(stale).toEqual({ accepted: false, reason: 'stopping' })
-    // disconnect 幂等
-    await ingress.disconnect()
-    expect(channel.stopCalls).toBe(1)
-    // 渠道表已注销：health 不再列出
-    expect(h.handle.health().channelStates).toEqual({})
+    // disconnect 幂等。
+    await ingress1.disconnect()
+    // app-2 不受影响：其排队任务保留、新消息仍可准入，scheduler 未停止。
+    expect(h.handle.health().pending).toBe(1)
+    const fresh = await ingress2.inbound(makeMessage('d4', { peerId: 'peer-2' }).message)
+    expect(fresh.accepted).toBe(true)
+    expect(h.handle.health().coreState).toBe('ready')
+    // 渠道表已注销 app-1；app-2 仍在。
+    expect(h.handle.health().channelStates).toEqual({ 'qq:app-2': 'online' })
+  })
+
+  it('disconnect 后可用新实例重新注册同一账号', async () => {
+    const h = await makeHarness()
+    const first = new FakeChannel('qq', 'app-1')
+    const ingress1 = h.handle.core.registerChannel(first)
+    await ingress1.disconnect()
+    const second = new FakeChannel('qq', 'app-1')
+    expect(() => h.handle.core.registerChannel(second)).not.toThrow()
+    expect(h.handle.health().channelStates).toEqual({ 'qq:app-1': 'connecting' })
+  })
+
+  it('setState blocked 记 manual_restart_required，reason 指引重跑 channel enable（重启兜底）', async () => {
+    const h = await makeHarness()
+    await h.handle.start()
+    const ingress = h.handle.core.registerChannel(new FakeChannel('qq', 'app-1'))
+    ingress.setState('blocked')
+    const line = h.logs.find((l) => l.event === 'manual_restart_required')
+    expect(String(line?.reason)).toContain('dsh-gateway channel enable qq')
+    expect(String(line?.reason)).toContain('fallback')
+  })
+
+  it('管理路由分派：POST JSON 交给 handler，非 POST/错误内容类型/坏 JSON 分别 404/400，异常 500', async () => {
+    const h = await makeHarness()
+    const seen: { path: string; body: unknown }[] = []
+    h.handle.setAdminHandler(async (path, body) => {
+      seen.push({ path, body })
+      if (path === '/boom') {
+        throw new Error('handler exploded')
+      }
+      if (path === '/known') {
+        return { status: 201, body: { echoed: body } }
+      }
+      return undefined
+    })
+    await h.handle.start()
+    const base = `http://127.0.0.1:${h.port}`
+
+    // POST + JSON 命中。
+    const ok = await fetch(`${base}/known`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ appId: 'x' }),
+    })
+    expect(ok.status).toBe(201)
+    expect(await ok.json()).toEqual({ echoed: { appId: 'x' } })
+    expect(seen).toEqual([{ path: '/known', body: { appId: 'x' } }])
+
+    // GET 不进管理路由 → 404。
+    expect((await fetch(`${base}/known`)).status).toBe(404)
+    expect((await fetch(`${base}/known`, { method: 'PUT' })).status).toBe(404)
+
+    // 非 JSON 内容类型 → 400。
+    const badType = await fetch(`${base}/known`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'x',
+    })
+    expect(badType.status).toBe(400)
+    expect(((await badType.json()) as { error: { code: string } }).error.code).toBe('invalid_request')
+
+    // 坏 JSON → 400。
+    const badJson = await fetch(`${base}/known`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{oops',
+    })
+    expect(badJson.status).toBe(400)
+    expect(((await badJson.json()) as { error: { code: string } }).error.code).toBe('invalid_request')
+
+    // handler 未命中路径 → 404。
+    expect(
+      (
+        await fetch(`${base}/unknown-admin-path`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+      ).status,
+    ).toBe(404)
+
+    // handler 抛错 → 500 + state_warning。
+    const boom = await fetch(`${base}/boom`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(boom.status).toBe(500)
+    expect(((await boom.json()) as { error: { code: string } }).error.code).toBe('internal_error')
+    expect(h.logs.some((l) => l.event === 'state_warning' && String(l.reason).includes('handler exploded'))).toBe(
+      true,
+    )
+  })
+
+  it('管理路由 body 超过 64 KiB：drain 剩余数据后仍能收到 400（连接不提前销毁）', async () => {
+    const h = await makeHarness()
+    let handlerSawBody = false
+    h.handle.setAdminHandler(async () => {
+      handlerSawBody = true
+      return { status: 200, body: { ok: true } }
+    })
+    await h.handle.start()
+
+    const response = await fetch(`http://127.0.0.1:${h.port}/known`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ appId: 'x'.repeat(70_000) }),
+    })
+
+    // 客户端能读到 400（先消费完超限 body 再响应，不 destroy socket）。
+    expect(response.status).toBe(400)
+    const body = (await response.json()) as { error: { code: string; message: string } }
+    expect(body.error.code).toBe('invalid_request')
+    expect(body.error.message).toContain('too large')
+    expect(handlerSawBody).toBe(false)
+  })
+
+  it('管理路由 body 读取中断（客户端提前断开）→ 客户端得到 400，不被误述为超限', async () => {
+    const h = await makeHarness()
+    let handlerSawBody = false
+    h.handle.setAdminHandler(async () => {
+      handlerSawBody = true
+      return { status: 200, body: { ok: true } }
+    })
+    await h.handle.start()
+
+    // 裸 socket 声明 content-length: 50 只发 10 字节后半关闭（FIN）。Node 24 的 HTTP 解析器
+    // 在 FIN 时先于应用层以自带 400（空 body、Connection: close）应答；因此这里钉的是可
+    // 观察不变量：中断路径得到 400 且绝不出现 "request body is too large" 误述（我们的
+    // "failed to read request body" 文案位于 readAdminBody 的 req error 分支，仅在错误事件
+    // 未被解析器先行拦截时触达）。
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = connect({ host: '127.0.0.1', port: h.port }, () => {
+        socket.write(
+          'POST /known HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: 50\r\n\r\n',
+        )
+        socket.write('x'.repeat(10))
+        socket.end()
+      })
+      let data = ''
+      socket.on('data', (chunk) => {
+        data += String(chunk)
+        resolve(data)
+        socket.destroy()
+      })
+      socket.on('close', () => resolve(data))
+      socket.on('error', (err) => {
+        if (data === '') {
+          reject(err)
+        }
+      })
+    })
+
+    expect(response).toContain(' 400 ')
+    expect(response).not.toContain('too large')
+    expect(handlerSawBody).toBe(false)
+  })
+
+  it('未注册管理 handler 时非 GET 请求一律 404', async () => {
+    const h = await makeHarness()
+    await h.handle.start()
+    const response = await fetch(`http://127.0.0.1:${h.port}/channels/qq`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ error: 'not found' })
   })
 })

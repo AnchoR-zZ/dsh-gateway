@@ -18,9 +18,12 @@ import {
   resolveGatewayWorkspace,
 } from './config.js'
 import type { GatewayConfig } from './config.js'
-import { loadGatewayConfig } from './config-file.js'
+import { loadGatewayConfigStore } from './config-file.js'
 import { createGatewayLogger } from './logging.js'
 import type { GatewayLogger } from './logging.js'
+import { createAdminRoutes } from './admin.js'
+import type { ChannelManager } from './channels.js'
+import { createChannelManager } from './channels.js'
 import { createGatewayCore } from './core/index.js'
 import type { CoreHandle } from './core/index.js'
 import { createScheduler } from './core/scheduler.js'
@@ -30,7 +33,8 @@ import { SCHEMA_VERSION, createStateStore } from './core/state-store.js'
 import { createTurnRunner } from './core/turn-runner.js'
 import type { TurnBlockLike, TurnEventSource, TurnHost, TurnSessionEvent } from './core/turn-runner.js'
 import { createQQChannel } from './qq/index.js'
-import type { QQChannel } from './qq/index.js'
+import { createQQTokenValidator } from './qq/token.js'
+import type { QQCredentialValidator } from './qq/token.js'
 
 /**
  * 插件入口与总装（设计 3.1、3.2、9.3、11.1、13.1、14 节）：本文件是唯一 import
@@ -251,12 +255,14 @@ export function createAgentHost(ctx: Context): {
 
 // ---- cordis 插件入口与总装（3.1、13.1、9.3、14） ----
 
-/** 宿主接入层的可测接缝（正式入口不传）：健康监听注入与 QQ 渠道工厂替身。 */
+/** 宿主接入层的可测接缝（正式入口不传）：健康监听注入、QQ 渠道工厂与凭证校验替身。 */
 export interface GatewayLaunchOptions {
   /** 健康监听注入（13.2 默认 127.0.0.1:17890）；测试用 port 0 探测随机端口。 */
   health?: { host?: string; port?: number }
   /** QQ 渠道工厂（测试替身避免真实网络）；缺省用真实 createQQChannel。 */
   createQQChannelAdapter?: typeof createQQChannel
+  /** QQ 凭证在线校验（管理路由 add 用；测试替身避免真实网络）。 */
+  validateQQCredentials?: QQCredentialValidator
   /** 结构化日志 sink（默认逐行 stdout）；测试捕获启动摘要与失败事件。 */
   loggerSink?: (line: string) => void
 }
@@ -298,10 +304,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 9.3 停止链：core 协调器与 QQ 的幂等 stop 并行有界等待，总预算 CORE_SHUTDOWN_BUDGET_MS。 */
-async function stopGateway(coreHandle: CoreHandle, qq: QQChannel, logger: GatewayLogger): Promise<void> {
+/** 9.3 停止链：core 协调器与全部渠道实例的幂等 stop 并行有界等待，总预算 CORE_SHUTDOWN_BUDGET_MS。 */
+async function stopGateway(
+  coreHandle: CoreHandle,
+  manager: ChannelManager,
+  logger: GatewayLogger,
+): Promise<void> {
+  // 先摘除管理路由：停止链期间新到达（含已通过就绪检查后排队）的管理请求一律按 404
+  // 处理，收窄"关机窗口内仍完成注册/写配置"的窗口；已在处理器内执行中的请求不受影响。
+  coreHandle.setAdminHandler(undefined)
   let settled = false
-  const both = Promise.allSettled([coreHandle.stop(), qq.stop()]).then(() => {
+  const both = Promise.allSettled([coreHandle.stop(), manager.stopAll()]).then(() => {
     settled = true
   })
   await new Promise<void>((resolve) => {
@@ -330,6 +343,11 @@ async function stopGateway(coreHandle: CoreHandle, qq: QQChannel, logger: Gatewa
 /**
  * 组装并后台启动网关。env 由调用方注入（正式入口固定 process.env），只用于解析
  * `DSH_GATEWAY_WORKSPACE`；其余配置从 workspace 内的 gateway.config.json 读取。
+ *
+ * 启动：core 就绪后按配置顺序拉起每个 `enabled` 的 QQ 实例；单个实例启动失败只记
+ * manual_restart_required 并继续（实例置 blocked，见健康表），进程不退出。零实例（空数组
+ * 或全部 disabled）时 core 正常运行，`/readyz` 200。管理路由（channel add/enable）经
+ * `coreHandle.setAdminHandler` 挂到健康 server。
  */
 export function launchGateway(
   ctx: Context,
@@ -337,10 +355,13 @@ export function launchGateway(
   options?: GatewayLaunchOptions,
 ): void {
   let gatewayConfig: GatewayConfig
+  let configStore: ReturnType<typeof loadGatewayConfigStore>
   try {
     const dshHome = resolveDshHomeForConfig(ctx)
     const workspaceDir = resolveGatewayWorkspace(env)
-    gatewayConfig = loadGatewayConfig({ workspaceDir, dshHome })
+    const loaded = loadGatewayConfigStore({ workspaceDir, dshHome })
+    gatewayConfig = loaded.config
+    configStore = loaded
   } catch (err) {
     // GatewayConfigError 的 message 只含字段/路径与原因、不含值；rethrow 使插件加载失败，
     // dsh 终止。
@@ -348,6 +369,17 @@ export function launchGateway(
     throw err
   }
   const logger = createGatewayLogger({ debug: gatewayConfig.debug, sink: options?.loggerSink })
+
+  if (configStore.createdTemplate) {
+    logger.logEvent('config_template_created', {
+      reason: `created a template at ${configStore.configPath}; run "dsh-gateway channel add qq" to add a bot`,
+    })
+  }
+  if (configStore.migratedFromV1) {
+    logger.logEvent('config_migrated', {
+      reason: `migrated ${configStore.configPath} from schemaVersion 1 to 2`,
+    })
+  }
 
   const { host, eventsFor } = createAgentHost(ctx)
 
@@ -378,6 +410,9 @@ export function launchGateway(
     limits: GATEWAY_LIMITS,
     logger,
   })
+  // channel 管理面晚于 coreHandle 构造（需要 core 注册面与健康快照），健康表先经闭包读
+  // manager 的最新实例清单；未构造前回落启动快照。
+  let manager: ChannelManager | undefined
   const coreHandle = createGatewayCore({
     config: gatewayConfig,
     limits: GATEWAY_LIMITS,
@@ -398,21 +433,30 @@ export function launchGateway(
     sessions,
     runner,
     health: options?.health,
+    currentQQInstances: () => manager?.listInstances() ?? gatewayConfig.qqInstances,
   })
-  const makeChannel = options?.createQQChannelAdapter ?? createQQChannel
-  const qq = makeChannel({
-    appId: gatewayConfig.qqAppId,
-    appSecret: gatewayConfig.qqAppSecret,
+  manager = createChannelManager({
     core: coreHandle.core,
     logger,
     limits: GATEWAY_LIMITS,
+    factory: options?.createQQChannelAdapter ?? createQQChannel,
+    instances: gatewayConfig.qqInstances,
+    channelState: (appId) => coreHandle.health().channelStates[`qq:${appId}`],
   })
+  coreHandle.setAdminHandler(
+    createAdminRoutes({
+      logger,
+      store: configStore,
+      manager,
+      validateQQCredentials: options?.validateQQCredentials ?? createQQTokenValidator(),
+      coreState: () => coreHandle.health().coreState,
+    }),
+  )
 
   ctx.effect(() => {
     void (async () => {
       try {
         await coreHandle.start()
-        await qq.start()
       } catch (err) {
         // 异步启动失败不能 throw 进已返回的 apply：统一停止协调器清理已创建资源
         // （core 保持非 ready，readiness 503），不主动退出进程——manual_restart_required
@@ -425,14 +469,34 @@ export function launchGateway(
             reason: `core stop after startup failure threw: ${errorMessage(stopErr)}`,
           })
         })
-        await qq.stop().catch((stopErr: unknown) => {
+        await manager?.stopAll().catch((stopErr: unknown) => {
           logger.logEvent('state_warning', {
-            reason: `qq stop after startup failure threw: ${errorMessage(stopErr)}`,
+            reason: `channel stop after startup failure threw: ${errorMessage(stopErr)}`,
           })
         })
+        return
+      }
+      // 按配置顺序拉起 enabled 实例；单个失败只影响自身（blocked + manual_restart_required），
+      // 其余实例与 core 继续（多实例失败隔离）。凭证从管理面的最新实例清单读取（循环内的
+      // await 期间管理路由可能已更新同 appId 的 secret），避免用启动快照的旧凭证重启。
+      for (const startupInstance of gatewayConfig.qqInstances) {
+        const current = manager
+          .listInstances()
+          .find((instance) => instance.appId === startupInstance.appId)
+        if (current === undefined || !current.enabled) {
+          continue
+        }
+        // 已在线则幂等跳过（如循环等待期间管理路由已拉起该实例），避免对在线实例停旧起新。
+        if (coreHandle.health().channelStates[`qq:${current.appId}`] === 'online') {
+          continue
+        }
+        const result = await manager.startInstance(current.appId, current.appSecret)
+        if (result.startError !== undefined) {
+          continue
+        }
       }
     })()
-    return () => stopGateway(coreHandle, qq, logger)
+    return () => stopGateway(coreHandle, manager, logger)
   })
 }
 

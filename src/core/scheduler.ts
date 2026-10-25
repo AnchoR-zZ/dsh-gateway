@@ -123,6 +123,12 @@ export interface Scheduler {
    * promise settle 后自然释放。幂等：重复调用为 no-op。
    */
   stop(): void
+  /**
+   * 按绑定键前缀丢弃尚未执行的排队任务（渠道实例注销用，前缀为
+   * `<channelId>_<accountId>_`）：每个任务恰一次 `onStopDropped`，pending 计数相应扣减；
+   * 运行中任务不受影响，调度器与其他用户的队列继续。返回丢弃条数。
+   */
+  dropBindingPrefix(prefix: string): number
   /** 内部条目数等观测值；仅供测试与诊断，不属于健康探针契约。 */
   inspect(): { peerEntries: number }
 }
@@ -354,11 +360,52 @@ export function createScheduler(options: {
     pendingBytes = 0
   }
 
+  function dropBindingPrefix(prefix: string): number {
+    let dropped = 0
+    let droppedBytes = 0
+    for (const [bindingId, peer] of peers) {
+      if (!bindingId.startsWith(prefix)) {
+        continue
+      }
+      for (const entry of peer.queue) {
+        dropped += 1
+        droppedBytes += entry.bytes
+        try {
+          callbacks.onStopDropped(entry.task)
+        } catch (error) {
+          logger.logEvent('turn_failed', {
+            requestId: entry.task.requestId,
+            bindingId,
+            messageId: entry.task.messageId,
+            reason: 'stop_drop_callback_error',
+            error: toErrorMessage(error),
+          })
+        }
+      }
+      peer.queue = []
+      peer.ready = false
+      // busy 用户的条目保留到其执行 promise settle 后由 settleOccupied 回收。
+      if (!peer.busy) {
+        peers.delete(bindingId)
+      }
+    }
+    if (dropped > 0) {
+      for (let i = readyOrder.length - 1; i >= 0; i -= 1) {
+        if (readyOrder[i]!.startsWith(prefix)) {
+          readyOrder.splice(i, 1)
+        }
+      }
+      pendingTotal -= dropped
+      pendingBytes -= droppedBytes
+    }
+    return dropped
+  }
+
   function inspect(): { peerEntries: number } {
     return { peerEntries: peers.size }
   }
 
-  return { admit, stats, stop, inspect }
+  return { admit, stats, stop, dropBindingPrefix, inspect }
 }
 
 /** 错误转已脱敏前的字符串 message（logging.logEvent 的 error/reason 字段会再过一次 redact）。 */

@@ -1,30 +1,47 @@
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
+import { isValidBindingScope } from './contracts.js'
+
 /**
  * 网关配置：唯一环境变量 `DSH_GATEWAY_WORKSPACE` 加 `<workspace>/gateway.config.json`。
  *
- * 环境变量只决定 workspace 根；配置文件承载 QQ 凭证、debug 和调度/回收参数。字段缺失时使用
- * 本模块的默认值，未知字段、类型错误、缺 QQ 凭证、非法路径等一律抛 GatewayConfigError 拒绝
- * 启动。错误消息只包含字段名/路径与原因，不包含 qqAppSecret 的值。
+ * 环境变量只决定 workspace 根；配置文件承载渠道实例凭证、debug 和调度/回收参数。未知字段、
+ * 类型错误、非法路径等一律抛 GatewayConfigError 拒绝启动。错误消息只包含字段名/路径与原因，
+ * 不包含 appSecret 的值。
  *
- * 本模块保持无文件 IO：配置文件的读取、模板创建与路径重叠校验在 config-file.ts。
+ * schemaVersion 2：QQ 凭证移入 `channels.qq` 实例数组，每个实例以 `appId` 标识并携带独立的
+ * `enabled` 开关；数组可为空（未配置任何 bot）。检测到 schemaVersion 1 的旧文档时由
+ * config-file.ts 自动迁移为 v2 并写回（单向）。本模块保持无文件 IO。
  */
 
 /** 配置文件当前唯一支持的 schema 版本。 */
-export const GATEWAY_CONFIG_SCHEMA_VERSION = 1
+export const GATEWAY_CONFIG_SCHEMA_VERSION = 2
 
 /** `<DSH_GATEWAY_WORKSPACE>` 未设置时的默认目录名，位于操作系统 home 下。 */
 export const DEFAULT_GATEWAY_WORKSPACE_DIRNAME = '.dsh-gateway'
 
-/** 类型化运行时配置；启动时解析一次，变更走重启，不热重载。全部字段只读。 */
+/** 渠道实例 `appId` trim 后的最大长度。 */
+export const CHANNEL_APP_ID_MAX_LENGTH = 128
+
+/** 渠道实例 `appSecret` trim 后的最大长度。 */
+export const CHANNEL_APP_SECRET_MAX_LENGTH = 256
+
+/** QQ 渠道实例配置；实例标识为 `appId`，启用与凭证分层。 */
+export interface QQChannelInstance {
+  readonly appId: string
+  readonly appSecret: string
+  readonly enabled: boolean
+}
+
+/** 类型化运行时配置；启动时解析一次。除 channel 实例的增改启（管理路由热生效）外，变更走重启。 */
 export interface GatewayConfig {
   /** `<workspace>/state`。 */
   readonly stateDir: string
   /** `<workspace>/users`。 */
   readonly workspaceRoot: string
-  readonly qqAppId: string
-  readonly qqAppSecret: string
+  /** 启动时加载的 QQ 实例清单（含 disabled 实例）。 */
+  readonly qqInstances: readonly QQChannelInstance[]
   readonly debug: boolean
   readonly maxConcurrent: number
   readonly maxPendingPerPeer: number
@@ -34,11 +51,11 @@ export interface GatewayConfig {
   readonly maxLiveAgents: number
 }
 
-/** 配置文件中的完整字段形状；schemaVersion、QQ 凭证必填，其余字段可缺省取默认值。 */
+/** 配置文件中的完整字段形状；`schemaVersion` 必填，其余字段可缺省取默认值。 */
 export interface GatewayConfigFile {
-  readonly schemaVersion: 1
-  readonly qqAppId: string
-  readonly qqAppSecret: string
+  readonly schemaVersion: typeof GATEWAY_CONFIG_SCHEMA_VERSION
+  /** 渠道实例表；本期只支持 `qq` 键。 */
+  readonly channels: { readonly qq: readonly QQChannelInstance[] }
   readonly debug: boolean
   readonly maxConcurrent: number
   readonly maxPendingPerPeer: number
@@ -56,11 +73,10 @@ export class GatewayConfigError extends Error {
   }
 }
 
-/** 配置模板与缺省值；qq 字段在模板里为空，校验时仍要求非空。 */
+/** 配置模板与缺省值；`channels.qq` 为空数组（未配置任何 bot）。 */
 const DEFAULT_GATEWAY_CONFIG_FILE: GatewayConfigFile = Object.freeze({
   schemaVersion: GATEWAY_CONFIG_SCHEMA_VERSION,
-  qqAppId: '',
-  qqAppSecret: '',
+  channels: Object.freeze({ qq: Object.freeze([]) }),
   debug: false,
   maxConcurrent: 4,
   maxPendingPerPeer: 3,
@@ -70,9 +86,14 @@ const DEFAULT_GATEWAY_CONFIG_FILE: GatewayConfigFile = Object.freeze({
   maxLiveAgents: 32,
 })
 
-/** 生成首次启动写入的配置文件内容（UTF-8 JSON，2 空格缩进，结尾换行）。 */
+/** 生成配置文件文本（UTF-8 JSON，2 空格缩进，结尾换行）；模板与保存写回共用同一序列化。 */
+export function serializeGatewayConfigFile(file: GatewayConfigFile): string {
+  return `${JSON.stringify(file, null, 2)}\n`
+}
+
+/** 生成首次启动写入的配置文件内容；写入后可直接按 v2 加载（零实例）。 */
 export function createGatewayConfigTemplate(): string {
-  return `${JSON.stringify(DEFAULT_GATEWAY_CONFIG_FILE, null, 2)}\n`
+  return serializeGatewayConfigFile(DEFAULT_GATEWAY_CONFIG_FILE)
 }
 
 /**
@@ -102,7 +123,7 @@ function fieldError(configPath: string, field: string, reason: string): GatewayC
   return new GatewayConfigError(`${configPath}: ${field} ${reason}`)
 }
 
-function requireSchemaVersion(value: unknown, configPath: string): 1 {
+function requireSchemaVersion(value: unknown, configPath: string): 2 {
   if (value === undefined) {
     throw fieldError(configPath, 'schemaVersion', 'is required')
   }
@@ -148,11 +169,75 @@ function optionalPositiveInteger(
   return value
 }
 
+/** 校验单个 QQ 渠道实例对象；只允许 `appId`、`appSecret`、`enabled` 三个字段。 */
+function parseQQInstance(value: unknown, configPath: string, index: number): QQChannelInstance {
+  const field = `channels.qq[${index}]`
+  if (!isPlainObject(value)) {
+    throw fieldError(configPath, field, 'must be an object')
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== 'appId' && key !== 'appSecret' && key !== 'enabled') {
+      throw fieldError(configPath, `${field}`, `unknown field "${key}"`)
+    }
+  }
+  const appId = requireNonEmptyString(value.appId, configPath, `${field}.appId`)
+  if (appId.length > CHANNEL_APP_ID_MAX_LENGTH) {
+    throw fieldError(configPath, `${field}.appId`, `must be at most ${CHANNEL_APP_ID_MAX_LENGTH} characters`)
+  }
+  // appId 是 bindingId 的前缀段（isValidBindingScope）：前置拒绝会在注册面被拒、
+  // 永远 blocked 的字符（如含 `_`）。
+  if (!isValidBindingScope(appId)) {
+    throw fieldError(configPath, `${field}.appId`, 'must only contain [A-Za-z0-9-] characters')
+  }
+  const appSecret = requireNonEmptyString(value.appSecret, configPath, `${field}.appSecret`)
+  if (appSecret.length > CHANNEL_APP_SECRET_MAX_LENGTH) {
+    throw fieldError(
+      configPath,
+      `${field}.appSecret`,
+      `must be at most ${CHANNEL_APP_SECRET_MAX_LENGTH} characters`,
+    )
+  }
+  const enabled = optionalBoolean(value.enabled, configPath, `${field}.enabled`, true)
+  return Object.freeze({ appId, appSecret, enabled })
+}
+
+/** 校验 `channels` 对象；只允许 `qq` 键，其余键按未知渠道类型拒绝（微信暂未支持）。 */
+function parseChannels(value: unknown, configPath: string): { readonly qq: readonly QQChannelInstance[] } {
+  if (value === undefined) {
+    return Object.freeze({ qq: Object.freeze([]) })
+  }
+  if (!isPlainObject(value)) {
+    throw fieldError(configPath, 'channels', 'must be an object')
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== 'qq') {
+      throw new GatewayConfigError(
+        `${configPath}: unknown channel type "${key}"; only "qq" is supported (weixin is not supported yet)`,
+      )
+    }
+  }
+  const qqRaw = value.qq
+  if (qqRaw === undefined) {
+    return Object.freeze({ qq: Object.freeze([]) })
+  }
+  if (!Array.isArray(qqRaw)) {
+    throw fieldError(configPath, 'channels.qq', 'must be an array')
+  }
+  const qq = Object.freeze(qqRaw.map((item, index) => parseQQInstance(item, configPath, index)))
+  const seen = new Set<string>()
+  for (const instance of qq) {
+    if (seen.has(instance.appId)) {
+      throw new GatewayConfigError(`${configPath}: duplicate channels.qq appId "${instance.appId}"`)
+    }
+    seen.add(instance.appId)
+  }
+  return Object.freeze({ qq })
+}
+
 /** 配置文件的全部合法字段；任何其他字段都视为拼写错误或旧版本残留。 */
-const CONFIG_FIELDS = new Set<keyof GatewayConfigFile>([
+const CONFIG_FIELDS = new Set<keyof GatewayConfigFile | 'channels'>([
   'schemaVersion',
-  'qqAppId',
-  'qqAppSecret',
+  'channels',
   'debug',
   'maxConcurrent',
   'maxPendingPerPeer',
@@ -163,7 +248,7 @@ const CONFIG_FIELDS = new Set<keyof GatewayConfigFile>([
 ])
 
 /**
- * 严格校验已解析的 JSON 对象。缺省的非必填字段取默认值；unknown/null/类型错误拒绝。
+ * 严格校验已解析的 v2 JSON 对象。缺省的非必填字段取默认值；unknown/null/类型错误拒绝。
  * `configPath` 只用于错误定位，不参与配置值。
  */
 export function parseGatewayConfigDocument(value: unknown, configPath: string): GatewayConfigFile {
@@ -177,8 +262,7 @@ export function parseGatewayConfigDocument(value: unknown, configPath: string): 
   }
 
   const schemaVersion = requireSchemaVersion(value.schemaVersion, configPath)
-  const qqAppId = requireNonEmptyString(value.qqAppId, configPath, 'qqAppId')
-  const qqAppSecret = requireNonEmptyString(value.qqAppSecret, configPath, 'qqAppSecret')
+  const channels = parseChannels(value.channels, configPath)
   const debug = optionalBoolean(
     value.debug,
     configPath,
@@ -228,8 +312,117 @@ export function parseGatewayConfigDocument(value: unknown, configPath: string): 
 
   return Object.freeze({
     schemaVersion,
-    qqAppId,
-    qqAppSecret,
+    channels,
+    debug,
+    maxConcurrent,
+    maxPendingPerPeer,
+    maxPendingTotal,
+    maxPendingBytes,
+    idleAgentTtlMs,
+    maxLiveAgents,
+  })
+}
+
+/** v1 顶层文档的全部合法字段。 */
+const LEGACY_CONFIG_FIELDS = new Set([
+  'schemaVersion',
+  'qqAppId',
+  'qqAppSecret',
+  'debug',
+  'maxConcurrent',
+  'maxPendingPerPeer',
+  'maxPendingTotal',
+  'maxPendingBytes',
+  'idleAgentTtlMs',
+  'maxLiveAgents',
+])
+
+/**
+ * 校验 schemaVersion 1 的旧文档并转换为 v2：顶层 `qqAppId`/`qqAppSecret` 变为
+ * `channels.qq[0]`（`enabled: true`），其余字段沿用。`qqAppId` 与 `qqAppSecret` 双双为
+ * trim 后的空串（旧版首启模板形态）时无凭证可迁，产物为 `channels.qq: []`（零实例），
+ * 升级后以零实例正常启动。恰好一个为空、一个非空属真实配置错误，照常拒绝。转换是纯函数，
+ * 写回由 config-file.ts 负责；v1 文档本身非法（单空凭证、未知字段等）时抛
+ * GatewayConfigError 且不产生转换结果。
+ */
+export function migrateLegacyGatewayConfigDocument(value: unknown, configPath: string): GatewayConfigFile {
+  if (!isPlainObject(value)) {
+    throw new GatewayConfigError(`${configPath}: root must be an object`)
+  }
+  for (const key of Object.keys(value)) {
+    if (!LEGACY_CONFIG_FIELDS.has(key)) {
+      throw new GatewayConfigError(`${configPath}: unknown field "${key}"`)
+    }
+  }
+  if (value.schemaVersion !== 1) {
+    throw fieldError(
+      configPath,
+      'schemaVersion',
+      `must be 1 for legacy migration; unsupported version ${String(value.schemaVersion)}`,
+    )
+  }
+  // 双空判定只认 trim 后为空的字符串；缺失或非字符串值不走放行路径，由下方常规校验拒绝。
+  const qqAppIdBlank = typeof value.qqAppId === 'string' && value.qqAppId.trim() === ''
+  const qqAppSecretBlank = typeof value.qqAppSecret === 'string' && value.qqAppSecret.trim() === ''
+  let channels: { readonly qq: readonly QQChannelInstance[] }
+  if (qqAppIdBlank && qqAppSecretBlank) {
+    // 旧版首启模板（双空凭证）：迁移为零实例，其余字段照常携带。
+    channels = Object.freeze({ qq: Object.freeze([]) })
+  } else {
+    const qqAppId = requireNonEmptyString(value.qqAppId, configPath, 'qqAppId')
+    // 与 v2 实例同规则（appId 即迁移产物的 channels.qq[0].appId）：在写回迁移文档之前拒绝，
+    // 避免非法 v1 被改写为同样非法的 v2 后才报错。
+    if (!isValidBindingScope(qqAppId)) {
+      throw fieldError(configPath, 'qqAppId', 'must only contain [A-Za-z0-9-] characters')
+    }
+    const qqAppSecret = requireNonEmptyString(value.qqAppSecret, configPath, 'qqAppSecret')
+    channels = Object.freeze({
+      qq: Object.freeze([Object.freeze({ appId: qqAppId, appSecret: qqAppSecret, enabled: true })]),
+    })
+  }
+  const debug = optionalBoolean(value.debug, configPath, 'debug', DEFAULT_GATEWAY_CONFIG_FILE.debug)
+  const maxConcurrent = optionalPositiveInteger(
+    value.maxConcurrent,
+    configPath,
+    'maxConcurrent',
+    DEFAULT_GATEWAY_CONFIG_FILE.maxConcurrent,
+  )
+  const maxPendingPerPeer = optionalPositiveInteger(
+    value.maxPendingPerPeer,
+    configPath,
+    'maxPendingPerPeer',
+    DEFAULT_GATEWAY_CONFIG_FILE.maxPendingPerPeer,
+  )
+  const maxPendingTotal = optionalPositiveInteger(
+    value.maxPendingTotal,
+    configPath,
+    'maxPendingTotal',
+    DEFAULT_GATEWAY_CONFIG_FILE.maxPendingTotal,
+  )
+  const maxPendingBytes = optionalPositiveInteger(
+    value.maxPendingBytes,
+    configPath,
+    'maxPendingBytes',
+    DEFAULT_GATEWAY_CONFIG_FILE.maxPendingBytes,
+  )
+  const idleAgentTtlMs = optionalPositiveInteger(
+    value.idleAgentTtlMs,
+    configPath,
+    'idleAgentTtlMs',
+    DEFAULT_GATEWAY_CONFIG_FILE.idleAgentTtlMs,
+  )
+  const maxLiveAgents = optionalPositiveInteger(
+    value.maxLiveAgents,
+    configPath,
+    'maxLiveAgents',
+    DEFAULT_GATEWAY_CONFIG_FILE.maxLiveAgents,
+  )
+  if (maxLiveAgents < maxConcurrent) {
+    throw fieldError(configPath, 'maxLiveAgents', 'must be >= maxConcurrent')
+  }
+  return Object.freeze({
+    schemaVersion: GATEWAY_CONFIG_SCHEMA_VERSION,
+    channels,
     debug,
     maxConcurrent,
     maxPendingPerPeer,
@@ -245,8 +438,7 @@ export function buildGatewayConfig(workspaceDir: string, file: GatewayConfigFile
   return {
     stateDir: join(workspaceDir, 'state'),
     workspaceRoot: join(workspaceDir, 'users'),
-    qqAppId: file.qqAppId,
-    qqAppSecret: file.qqAppSecret,
+    qqInstances: file.channels.qq,
     debug: file.debug,
     maxConcurrent: file.maxConcurrent,
     maxPendingPerPeer: file.maxPendingPerPeer,

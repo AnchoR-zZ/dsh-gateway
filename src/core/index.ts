@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import type { GatewayConfig } from '../config.js'
+import type { GatewayConfig, QQChannelInstance } from '../config.js'
 import { computeBindingId, isValidBindingScope } from '../contracts.js'
 import type {
   ChannelIdentity,
@@ -19,7 +19,7 @@ import type { AgentHandleLike, SessionManager } from './session-manager.js'
 import type { StateStore } from './state-store.js'
 import type { TurnRunner } from './turn-runner.js'
 import { createCoreStateMachine, createHealthServer, createStopCoordinator } from './lifecycle.js'
-import type { ChannelState, CoreState, StopStepContext } from './lifecycle.js'
+import type { AdminHandler, ChannelHealthState, ChannelState, CoreState, StopStepContext } from './lifecycle.js'
 
 /**
  * core/index：GatewayCore 总装（设计 2 节、4.2、6.1、6.2、8.1、9.1、9.3、12 表、13 节）。
@@ -29,11 +29,13 @@ import type { ChannelState, CoreState, StopStepContext } from './lifecycle.js'
  * 准入并立即返回（不等任何执行）；SchedulerCallbacks.execute 实现 8.1 的"出队 → prepare →
  * runner（观察器先于 followup 在 runner 内完成）→ deliver"管道，10 分钟截止从获得全局槽
  * 起算并覆盖 prepare；enterFailed 是 12 表"停止准入"各行的汇集点；stop 委托 lifecycle 的
- * 幂等停止协调器。本模块不导入 QQ SDK 与 dsh 运行时包（设计 2 节边界）；事件源适配
- * （eventsFor）由插件入口在构造 runner 时直接注入，core 不持有事件订阅。
+ * 幂等停止协调器。多实例并存：单实例 disconnect 只注销该实例、丢弃其排队任务并中断其
+ * 运行中的执行，scheduler 与其他实例继续。本模块不导入 QQ SDK 与 dsh 运行时包（设计 2 节
+ * 边界）；事件源适配（eventsFor）由插件入口在构造 runner 时直接注入，core 不持有事件订阅。
  */
 
-export type { ChannelState, CoreState } from './lifecycle.js'
+export type { ChannelHealthState, ChannelState, CoreState } from './lifecycle.js'
+export type { AdminHandler } from './lifecycle.js'
 
 /** limits 注入形状：键集合与 GATEWAY_LIMITS 一致，值放宽为 number 以便测试注入小预算。 */
 export type CoreLimits = { readonly [K in keyof typeof GATEWAY_LIMITS]: number }
@@ -59,12 +61,20 @@ export interface GatewayCoreOptions {
   requestId?: () => string
   /** 健康监听注入（默认 127.0.0.1:17890）；测试用 host/port=0 探测随机端口。 */
   health?: { host?: string; port?: number }
+  /**
+   * 当前配置的 QQ 实例清单（健康展示的 `disabled`/`not_configured` 来源）；缺省固定取
+   * `config.qqInstances` 的启动快照。channel 管理面热更新配置后经此回调反映最新清单。
+   */
+  currentQQInstances?: () => readonly QQChannelInstance[]
 }
 
-/** 健康快照（/readyz 正文与探针判定共用）；channelStates 键为 channelId，不含 accountId。 */
+/**
+ * 健康快照（/readyz 正文与探针判定共用）；channelStates 键为 `<channelId>:<appId>`，
+ * 值含配置派生的 `disabled`/`not_configured`。
+ */
 export interface CoreHealth {
   coreState: CoreState
-  channelStates: Record<string, ChannelState>
+  channelStates: Record<string, ChannelHealthState>
   pending: number
   running: number
   startedAt: string
@@ -73,6 +83,11 @@ export interface CoreHealth {
 export interface CoreHandle {
   /** 给渠道适配器（T10）的注册面。 */
   core: GatewayCore
+  /**
+   * 注册本机 channel 管理路由处理器（见 lifecycle 的 AdminHandler）；应在 start() 之前
+   * 调用，传 undefined 撤销注册。
+   */
+  setAdminHandler(handler: AdminHandler | undefined): void
   /**
    * 启动（13.1）：绑定健康监听（占用失败抛错，不杀别的进程）→ store.load()（校验失败
    * 抛错，由 T10 决定进程退出）→ sessions.start()（回收器）→ coreState=ready。
@@ -89,6 +104,9 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
   const now: () => number = options.now ?? Date.now
   const mono: () => number = options.mono ?? (() => Math.round(performance.now()))
   const nextRequestId: () => string = options.requestId ?? randomUUID
+  const currentQQInstances: () => readonly QQChannelInstance[] =
+    options.currentQQInstances ?? (() => options.config.qqInstances)
+  let adminHandler: AdminHandler | undefined
 
   const stateMachine = createCoreStateMachine({ logger })
   let startedAt = ''
@@ -103,11 +121,27 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     JSON.stringify([channelId, accountId])
   const channels = new Map<string, ChannelEntry>()
 
-  function channelStates(): Record<string, ChannelState> {
-    const states: Record<string, ChannelState> = {}
+  /**
+   * 健康渠道表：配置实例先行铺底（enabled 未注册 → blocked、disabled 未注册 → disabled），
+   * 已注册实例覆盖为其运行状态；qq 类型零实例（配置与注册表皆空）时保留 `not_configured`。
+   */
+  function mergedChannelStates(): Record<string, ChannelHealthState> {
+    const states: Record<string, ChannelHealthState> = {}
+    let qqConfigured = false
+    for (const instance of currentQQInstances()) {
+      states[`qq:${instance.appId}`] = instance.enabled ? 'blocked' : 'disabled'
+      qqConfigured = true
+    }
+    let qqRegistered = false
     for (const entry of channels.values()) {
-      // 键只用 channelId（13.2 正文禁 AppID；初版单渠道，同 channelId 多账号时后写覆盖）。
-      states[entry.channel.channelId] = entry.state
+      const { channelId, accountId } = entry.channel
+      states[`${channelId}:${accountId}`] = entry.state
+      if (channelId === 'qq') {
+        qqRegistered = true
+      }
+    }
+    if (!qqConfigured && !qqRegistered) {
+      states.qq = 'not_configured'
     }
     return states
   }
@@ -377,10 +411,12 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
   }
   const scheduler = options.createScheduler(schedulerCallbacks)
 
-  // ---- 健康探针（13.2）。
-  function allChannelsOnline(): boolean {
-    for (const entry of channels.values()) {
-      if (entry.state !== 'online') {
+  // ---- 健康探针（13.2）。ready 判定不含 `disabled`/`not_configured` 条目：已启用实例
+  // 无论注册表状态（connecting/blocked/reconnecting）还是"enabled 但未注册"的 blocked
+  // 铺底值，都使整体 ready 为假。
+  function allChannelsHealthy(): boolean {
+    for (const state of Object.values(mergedChannelStates())) {
+      if (state !== 'online' && state !== 'disabled' && state !== 'not_configured') {
         return false
       }
     }
@@ -391,17 +427,18 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     host: options.health?.host,
     port: options.health?.port,
     logger,
+    admin: (path, body) => (adminHandler === undefined ? Promise.resolve(undefined) : adminHandler(path, body)),
     snapshot: () => {
       const stats = scheduler.stats()
       return {
         coreState: stateMachine.get(),
-        channels: channelStates(),
+        channels: mergedChannelStates(),
         pending: stats.pendingTotal,
         running: stats.running,
         startedAt,
       }
     },
-    ready: () => stateMachine.get() === 'ready' && !store.isFailed() && allChannelsOnline(),
+    ready: () => stateMachine.get() === 'ready' && !store.isFailed() && allChannelsHealthy(),
   })
 
   // ---- 停止协调器（9.3）接线。
@@ -611,35 +648,40 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     return { accepted: false, reason: result.reason }
   }
 
-  // ---- 渠道注销（4.2 + 简报单渠道简化说明）。
+  // ---- 渠道注销（4.2）：只影响该实例——丢其排队任务、停收、中断其运行中执行，
+  // scheduler 与其他实例继续；之后可用新实例重新注册同一 [channelId, accountId]。
   async function disconnect(entry: ChannelEntry, ingressGeneration: number): Promise<void> {
     if (entry.generation !== ingressGeneration) {
       return
     }
     entry.generation += 1
-    const key = channelKey(entry.channel.channelId, entry.channel.accountId)
+    const { channelId, accountId } = entry.channel
+    const key = channelKey(channelId, accountId)
     if (channels.get(key) === entry) {
       channels.delete(key)
     }
-    // 单渠道简化（简报）：scheduler 无按渠道过滤丢弃的 API，disconnect 复用全局 stop 路径
-    // 的前半——丢弃全部内存队列（ports 经 onStopDropped 关闭）。多渠道扩展点：给 scheduler
-    // 增加按渠道（bindingId 前缀或显式渠道标记）的丢弃过滤；disconnect 后本 core 实例的
-    // 调度器已 stopping，重新注册需要重建 core（初版单实例可接受）。
-    scheduler.stop()
+    scheduler.dropBindingPrefix(`${channelId}_${accountId}_`)
     try {
       await entry.channel.stopReceiving()
     } catch (err) {
       logger.logEvent('turn_failed', {
-        channelId: entry.channel.channelId,
+        channelId,
         generation: ingressGeneration,
         reason: `stopReceiving threw during disconnect: ${errorMessage(err)}`,
       })
     }
-    // 等待/取消该渠道的运行任务：中断全部活动 run（prepare abort + runner stopInterrupt），
-    // 由各自管道的有界预算收敛；不在 disconnect 内无限等待。
-    for (const run of runs.values()) {
-      run.abort()
-      run.interrupt()
+    // 中断该实例运行中的执行（prepare abort + runner stopInterrupt），由各自管道的
+    // 有界预算收敛；不在 disconnect 内无限等待，其他实例的执行不受影响。
+    for (const [runToken, run] of runs) {
+      const meta = taskMeta.get(runToken)
+      if (
+        meta !== undefined &&
+        meta.identity.channelId === channelId &&
+        meta.identity.accountId === accountId
+      ) {
+        run.abort()
+        run.interrupt()
+      }
     }
   }
 
@@ -678,11 +720,13 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
           }
           entry.state = state
           if (state === 'blocked') {
-            // 13.3：不可恢复关闭/凭证错误 → 保持 blocked、停止接流量、等人工重启。
+            // 13.3：不可恢复关闭/凭证错误 → 保持 blocked、停止接流量；处置是修因后重跑 enable
+            // 拉起新实例（重启进程仅兜底）。
             logger.logEvent('manual_restart_required', {
               channelId: channel.channelId,
               generation: ingressGeneration,
-              reason: 'channel reported blocked; fix configuration and restart manually',
+              reason:
+                'channel reported blocked; fix the cause, then rerun "dsh-gateway channel enable qq" to start a fresh instance (restarting the gateway is the fallback)',
             })
           } else if (state === 'reconnecting') {
             logger.logEvent('channel_reconnecting', {
@@ -719,7 +763,7 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     const stats = scheduler.stats()
     return {
       coreState: stateMachine.get(),
-      channelStates: channelStates(),
+      channelStates: mergedChannelStates(),
       pending: stats.pendingTotal,
       running: stats.running,
       startedAt,
@@ -728,6 +772,9 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
 
   return {
     core,
+    setAdminHandler: (handler: AdminHandler | undefined) => {
+      adminHandler = handler
+    },
     start,
     stop: () => coordinator.stop(),
     health,

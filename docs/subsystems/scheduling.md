@@ -61,6 +61,8 @@ expiresAt - now < TURN_DEADLINE_MS + QQ_OUTBOUND_MARGIN_MS
 
 `stop()` 幂等：置 `stopping`、清空就绪队列，对每个尚未出队的任务恰好调用一次 `onStopDropped`，由 core 只记录并关闭 port，不发送停机提示；等待计数随即归零，在飞任务不受影响，其槽位在 promise 落定后自然释放。`stop()` 之后 `admit` 一律返回 `stopping`，已接受任务不会被重新排队或补发。
 
+`dropBindingPrefix(prefix)` 供渠道注销（`disconnect`）按实例丢弃，与 `stop()` 互不影响调度器状态：对 bindingId 以 `<channelId>_<accountId>_` 为前缀的每个用户清空等待队列（每个任务恰好调用一次 `onStopDropped`）、移出就绪轮转并回收空闲条目（busy 条目留待在飞 promise 落定后回收），全局等待计数相应扣减；其余用户、全局调度与在飞任务不受影响，同账号随后可用新实例重新注册（见[状态机](../observability.md#state-machines)）。
+
 `execute` 或 `queueExpired` 回调 reject 不阻塞调度：调度器记录失败并按完成处理，释放槽与 `busy` 后继续轮转；`dropped` 回调同步抛错或返回 rejected promise 只记录，不占槽也不影响后续任务。
 
 <a id="turn-runner"></a>
@@ -135,5 +137,4 @@ turn-runner 在正常结果、超时、fatal 与运行契约异常路径各调�
 
 ## 已知缺口
 
-- 渠道适配器调用 `disconnect()` 时没有按渠道过滤队列的路径：它复用 `scheduler.stop()`，丢弃全部内存队列并让该 core 实例的调度器进入停止状态；重新注册渠道不会复位该状态，入站仍会被 `stopping` 拒绝，恢复需要重启进程。多渠道路由的扩展方式见 [扩展位置](../architecture.md#extension-points)。
 - turn 的截止、取消、flush 与事件时序只在替身 host 与替身事件源上验证：真实 dsh 的 `session/event` 顺序、`whenIdle()` 与持久化行为没有自动化覆盖，端到端偏差只能在真实环境联调中发现（覆盖范围见 [README](../../README.md)）。

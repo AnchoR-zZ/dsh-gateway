@@ -86,7 +86,10 @@ export interface QQChannel {
    * 启动失败即本实例终局（同实例重试为无操作），重启走新实例（设计 13.3 手动重启）。
    */
   start(): Promise<void>
-  /** stopReceiving 语义：bot.stop()（同步）+ 有界等待在途 inbound 处理。幂等。 */
+  /**
+   * 停止本实例：bot.stop()（同步）+ 有界等待在途 inbound 处理与后台 start 收敛，随后经
+   * ingress.disconnect 从 core 注销（多实例并存时只影响本实例）。幂等。
+   */
   stop(): Promise<void>
 }
 
@@ -156,6 +159,10 @@ function adaptRealBot(real: QQBot): QQBotLike {
 
 type ChannelState = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped'
 
+/** manual_restart_required 归因行的处置指引：修因后重跑 enable 拉起新实例，重启进程仅兜底。 */
+const ENABLE_REMEDY =
+  'rerun "dsh-gateway channel enable qq" after fixing the cause (restarting the gateway is the fallback)'
+
 export function createQQChannel(options: QQChannelOptions): QQChannel {
   const { appId, appSecret, core, logger, limits } = options
   const now: () => number = options.now ?? Date.now
@@ -188,7 +195,7 @@ export function createQQChannel(options: QQChannelOptions): QQChannel {
       return
     }
     outboundIsolated = true
-    logger.logEvent('manual_restart_required', { channelId: 'qq', reason })
+    logger.logEvent('manual_restart_required', { channelId: 'qq', reason: `${reason}; ${ENABLE_REMEDY}` })
     setState('blocked')
   }
 
@@ -393,7 +400,7 @@ export function createQQChannel(options: QQChannelOptions): QQChannel {
         // 终局断连：start() 随后以 GatewayError reject，由其处理器再确认 blocked。
         logger.logEvent('manual_restart_required', {
           channelId: 'qq',
-          reason: `gateway terminal disconnect ${event.code}: ${event.reason}`,
+          reason: `gateway terminal disconnect ${event.code}: ${event.reason}; ${ENABLE_REMEDY}`,
         })
         setState('blocked')
       }
@@ -406,8 +413,8 @@ export function createQQChannel(options: QQChannelOptions): QQChannel {
     const terminal =
       code === GatewayErrorCode.FATAL_CLOSE || code === GatewayErrorCode.RETRY_EXHAUSTED
     const reason = terminal
-      ? `gateway terminal failure (${String(code)})`
-      : `sdk start failed: ${errorMessage(err)}`
+      ? `gateway terminal failure (${String(code)}); ${ENABLE_REMEDY}`
+      : `sdk start failed: ${errorMessage(err)}; ${ENABLE_REMEDY}`
     logger.logEvent('manual_restart_required', { channelId: 'qq', reason })
     setState('blocked')
     channelState = 'stopped'
@@ -432,7 +439,7 @@ export function createQQChannel(options: QQChannelOptions): QQChannel {
     } catch (err) {
       logger.logEvent('manual_restart_required', {
         channelId: 'qq',
-        reason: `channel registration failed: ${errorMessage(err)}`,
+        reason: `channel registration failed: ${errorMessage(err)}; ${ENABLE_REMEDY}`,
       })
       // 本实例一次性：启动失败即终局，不重置 startRequested（13.3 手动重启走新实例）。
       // 由此 stop()/stopReceiving() 的缓存恒属于这唯一一个生命周期，不会跨重启残留而
@@ -492,6 +499,16 @@ export function createQQChannel(options: QQChannelOptions): QQChannel {
         } catch {
           // 有界等待超时：后台任务已挂 handler，不会产生 unhandled rejection。
         }
+      }
+      // 注销 core 注册（多实例并存：只影响本实例，丢其排队任务、中断其运行中执行）。
+      // 注册失败的实例 ingress 为 undefined，跳过。
+      try {
+        await ingress?.disconnect()
+      } catch (err) {
+        logger.logEvent('state_warning', {
+          channelId: 'qq',
+          reason: `ingress disconnect threw: ${errorMessage(err)}`,
+        })
       }
       if (previous !== 'stopped') {
         channelState = 'stopped'

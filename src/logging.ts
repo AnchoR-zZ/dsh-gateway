@@ -1,8 +1,9 @@
 /**
  * 结构化日志器（设计文档 14 节、11.3）：每条日志是一个 JSON 对象，单行输出到 sink（默认 stdout）。
  *
- * 原始 user_openid 和 AppID 不作为独立字段输出——LogFields 不提供这两个字段；但 QQ 的
- * bindingId 由 `qq_<AppID>_<user_openid>` 组成，会随 bindingId 字段记录，便于按身份关联日志。
+ * 原始 user_openid 不作为独立字段输出；channel 管理事件携带 `appId`（机器人 AppID），但
+ * `appSecret` 恒不输出。QQ 的 bindingId 由 `qq_<AppID>_<user_openid>` 组成，会随 bindingId
+ * 字段记录，便于按身份关联日志。
  *
  * debug 配置项在创建日志器时固定，关闭开关需重启生效；正文日志仅在 debug 开启时输出，
  * 且即便开启也持续脱敏凭证、Authorization、token 与已知 secret 形态。
@@ -35,6 +36,14 @@ export type GatewayLogEvent =
   | 'shutdown'
   /** T10 新增：启动摘要（14 节）——版本、映射 schema、provider/model 与有效策略；不 dump 环境或完整配置。 */
   | 'startup_summary'
+  /** channel 管理面：首次启动创建了配置模板（零实例，指引 CLI 添加）。 */
+  | 'config_template_created'
+  /** channel 管理面：配置文件由 v1 自动迁移为 v2 并写回。 */
+  | 'config_migrated'
+  /** channel 管理面：管理路由成功添加/更新了一个 QQ 实例。 */
+  | 'channel_added'
+  /** channel 管理面：管理路由启用（或幂等确认）了一个 QQ 实例。 */
+  | 'channel_enabled'
 
 /** 结构化字段；值只允许 string | number，undefined 的字段在序列化时省略。 */
 export interface LogFields {
@@ -74,6 +83,8 @@ export interface LogFields {
   /** T10 新增（startup_summary）：并行任务与 live handle 上限。 */
   maxConcurrent?: number
   maxLiveAgents?: number
+  /** channel 管理面：实例标识（QQ 的机器人 AppID）；管理事件与健康展示使用，日志恒不含 appSecret。 */
+  appId?: string
 }
 
 export interface GatewayLogger {

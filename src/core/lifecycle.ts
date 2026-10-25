@@ -1,4 +1,4 @@
-import { createServer, type Server, type ServerResponse } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 
 import type { GatewayLogger } from '../logging.js'
 
@@ -6,25 +6,49 @@ import type { GatewayLogger } from '../logging.js'
  * core/lifecycle：core 状态机、正常停止协调器（设计 9.3）与本机健康探针 server（13.2）。
  *
  * 本模块不直接持有 scheduler / session-manager / state-store 等具体依赖：停止协调器以钩子
- * 形式由组装层（core/index.ts）提供各步骤的具体实现，健康 server 只依赖快照函数与 ready
- * 谓词。保持 core 生命周期层不导入 QQ SDK 与 dsh 运行时包（设计 2 节边界）。
+ * 形式由组装层（core/index.ts）提供各步骤的具体实现，健康 server 只依赖快照函数、ready
+ * 谓词与可选的 channel 管理路由处理器。保持 core 生命周期层不导入 QQ SDK 与 dsh 运行时包
+ * （设计 2 节边界）。
  */
 
 export type CoreState = 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed'
 export type ChannelState = 'connecting' | 'online' | 'reconnecting' | 'blocked'
 
 /**
+ * 健康展示用的渠道状态：已注册实例的 `ChannelState` 之外，另有两类配置派生值——
+ * `disabled`（配置存在但 `enabled: false`，未注册）与 `not_configured`（该渠道类型零实例）。
+ * 两者都不参与就绪判定。
+ */
+export type ChannelHealthState = ChannelState | 'disabled' | 'not_configured'
+
+/**
  * /readyz 正文与健康快照共用的只读形状。
  * 只含状态、渠道状态表、待处理数量、运行数量与启动时间；无用户标识、无 sessionId、
- * 无 AppID、无错误原文（设计 13.2）。
+ * 无错误原文（设计 13.2）。渠道表按实例展开，键为 `<channelId>:<appId>`。
  */
 export interface HealthSnapshot {
   coreState: CoreState
-  channels: Record<string, ChannelState>
+  channels: Record<string, ChannelHealthState>
   pending: number
   running: number
   startedAt: string
 }
+
+/** channel 管理路由的应答；`undefined` 表示路径未命中（按 404 处理）。 */
+export interface AdminReply {
+  status: number
+  body: unknown
+}
+
+/**
+ * 本机 channel 管理路由处理器：只处理 POST + `application/json` 请求（方法与内容类型由
+ * 健康 server 统一判定），收到已解析的 JSON body。实现不得在响应正文、日志或错误信息中
+ * 回显 `appSecret`。
+ */
+export type AdminHandler = (path: string, body: unknown) => Promise<AdminReply | undefined>
+
+/** 管理请求 body 的字节上限；超出按 400 拒绝。 */
+const ADMIN_BODY_LIMIT_BYTES = 65_536
 
 /** 单向迁移表：`stopped` 与 `failed` 为吸收态（9.3、13.3）。 */
 const ALLOWED_TRANSITIONS: Readonly<Record<CoreState, readonly CoreState[]>> = {
@@ -68,7 +92,8 @@ export function createCoreStateMachine(options: {
 /**
  * 本机健康探针 server（13.2）：默认独占绑定 127.0.0.1:17890，同一 server 兼作单实例占位
  * 与只读状态查询。绑定失败（如 EADDRINUSE）由 start() 原样 reject，调用方拒绝启动，
- * 不尝试杀死其他进程。只绑回环，不接受消息或配置修改请求。
+ * 不尝试杀死其他进程。只绑回环；除 GET 探针外，仅接受注入的 channel 管理 POST 路由，
+ * 不接受消息或其他控制请求。
  */
 export interface HealthServer {
   /** 绑定监听并等待 listening；已启动时幂等 resolve。 */
@@ -83,10 +108,12 @@ export function createHealthServer(options: {
   host?: string
   port?: number
   logger: GatewayLogger
-  /** 探针正文来源；无用户标识、无 sessionId、无 AppID、无错误原文。 */
+  /** 探针正文来源；无用户标识、无 sessionId、无错误原文。 */
   snapshot: () => HealthSnapshot
-  /** readiness 谓词：core ready 且持久状态健康且全部已注册渠道 online。 */
+  /** readiness 谓词：core ready 且持久状态健康且全部需要在线的渠道条目 online。 */
   ready: () => boolean
+  /** 可选的 channel 管理路由；未注入时除 GET 探针外一律 404。 */
+  admin?: AdminHandler
 }): HealthServer {
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? 17_890
@@ -100,6 +127,10 @@ export function createHealthServer(options: {
     if (req.method === 'GET' && path === '/readyz') {
       const body = options.snapshot()
       respond(res, options.ready() ? 200 : 503, body)
+      return
+    }
+    if (options.admin !== undefined) {
+      void handleAdminRequest(options.admin, options.logger, req, res, path)
       return
     }
     respond(res, 404, { error: 'not found' })
@@ -162,6 +193,98 @@ function respond(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode
   res.setHeader('content-type', 'application/json')
   res.end(JSON.stringify(body))
+}
+
+function adminErrorBody(code: string, message: string): { error: { code: string; message: string } } {
+  return { error: { code, message } }
+}
+
+/** body 收集结果：成功（缓冲）、超限（>64 KiB）或读取失败（连接中断等 `error` 事件）。 */
+type AdminBodyResult = { body: Buffer } | { overflow: true } | { readFailed: true }
+
+/**
+ * 收集请求 body 至字节上限；超限或读取失败按对应形态返回（调用方按 400 拒绝，message 区分）。
+ * 超限后丢弃后续数据但继续消费到 `end` 再返回——不提前销毁连接，否则 400 响应无法送达
+ * 客户端（socket 已死）。
+ */
+function readAdminBody(req: IncomingMessage): Promise<AdminBodyResult> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let overflow = false
+    let settled = false
+    const finish = (value: AdminBodyResult): void => {
+      if (!settled) {
+        settled = true
+        resolve(value)
+      }
+    }
+    req.on('data', (chunk: Buffer) => {
+      if (settled || overflow) {
+        return
+      }
+      total += chunk.length
+      if (total > ADMIN_BODY_LIMIT_BYTES) {
+        overflow = true
+        chunks.length = 0
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => finish(overflow ? { overflow: true } : { body: Buffer.concat(chunks) }))
+    req.on('error', () => finish({ readFailed: true }))
+  })
+}
+
+/**
+ * 管理请求分派：仅接受 POST + `application/json`（其余按 404/400 拒绝），解析 body 后交给
+ * 注入的处理器；处理器未命中路径按 404，抛错按 500 并记 `state_warning`。
+ */
+async function handleAdminRequest(
+  admin: AdminHandler,
+  logger: GatewayLogger,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+): Promise<void> {
+  try {
+    if (req.method !== 'POST') {
+      respond(res, 404, { error: 'not found' })
+      return
+    }
+    const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+    if (!contentType.includes('application/json')) {
+      respond(res, 400, adminErrorBody('invalid_request', 'content-type must be application/json'))
+      return
+    }
+    const raw = await readAdminBody(req)
+    if ('overflow' in raw) {
+      respond(res, 400, adminErrorBody('invalid_request', 'request body is too large'))
+      return
+    }
+    if ('readFailed' in raw) {
+      respond(res, 400, adminErrorBody('invalid_request', 'failed to read request body'))
+      return
+    }
+    let body: unknown
+    try {
+      body = raw.body.length === 0 ? {} : (JSON.parse(raw.body.toString('utf8')) as unknown)
+    } catch {
+      respond(res, 400, adminErrorBody('invalid_request', 'request body is not valid JSON'))
+      return
+    }
+    const reply = await admin(path, body)
+    if (reply === undefined) {
+      respond(res, 404, { error: 'not found' })
+      return
+    }
+    respond(res, reply.status, reply.body)
+  } catch (err) {
+    logger.logEvent('state_warning', {
+      reason: `admin request failed: ${err instanceof Error ? err.message : String(err)}`,
+    })
+    respond(res, 500, adminErrorBody('internal_error', 'internal error while handling the request'))
+  }
 }
 
 /** 停止协调器的预算键（值放宽为 number，组装层可注入小预算驱动测试）。 */

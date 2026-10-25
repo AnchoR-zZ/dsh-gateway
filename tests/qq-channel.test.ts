@@ -93,6 +93,7 @@ type InboundResult =
 class FakeIngress implements ChannelIngress {
   readonly states: string[] = []
   readonly inboundMessages: InboundText[] = []
+  disconnectCalls = 0
   inboundResult: InboundResult = { accepted: true, requestId: 'req-1' }
 
   setState(state: 'connecting' | 'online' | 'reconnecting' | 'blocked'): void {
@@ -105,7 +106,7 @@ class FakeIngress implements ChannelIngress {
   }
 
   async disconnect(): Promise<void> {
-    // 渠道侧测试不覆盖 core 的 disconnect
+    this.disconnectCalls += 1
   }
 }
 
@@ -431,7 +432,11 @@ describe('bot.start() 后台化与失败归因（13.1、13.3）', () => {
     await h.channel.start()
     await new Promise((r) => setTimeout(r, 5))
     expect(h.ingress.states).toContain('blocked')
-    expect(String(h.find('manual_restart_required')[0]?.fields?.reason)).toContain('GATEWAY_FATAL_CLOSE')
+    const reason = String(h.find('manual_restart_required')[0]?.fields?.reason)
+    expect(reason).toContain('GATEWAY_FATAL_CLOSE')
+    // 归因行附处置指引：重跑 enable 拉起新实例，重启仅兜底。
+    expect(reason).toContain('dsh-gateway channel enable qq')
+    expect(reason).toContain('fallback')
   })
 })
 
@@ -442,6 +447,23 @@ describe('stop 与 stopReceiving（4.2、9.3）', () => {
     await h.channel.stop()
     expect(h.bot.stopCalls).toBe(1)
     expect(h.ops).toEqual(['register', 'bot.start', 'bot.stop'])
+  })
+
+  it('stop 经 ingress.disconnect 从 core 注销本实例，且幂等只断开一次', async () => {
+    const h = await startedHarness()
+    await h.channel.stop()
+    await h.channel.stop()
+    expect(h.ingress.disconnectCalls).toBe(1)
+  })
+
+  it('注册失败（无 ingress）时 stop 不触发 disconnect', async () => {
+    const h = new Harness()
+    h.core.registerChannel = () => {
+      throw new Error('duplicate channel account')
+    }
+    await expect(h.channel.start()).rejects.toThrow('duplicate channel account')
+    await h.channel.stop()
+    expect(h.ingress.disconnectCalls).toBe(0)
   })
 
   it('注册的 stopReceiving 与 stop 等价作用于 bot', async () => {
