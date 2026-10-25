@@ -86,7 +86,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `startup_summary` | 插件加载时、core 创建之前记录一次启动摘要 | `version`、`schemaVersion`、`configSchemaVersion`、`provider`、`model`、`policy`、`maxConcurrent`、`maxLiveAgents` |
 | `queued` | core 准入接受入站并同步入队 | `requestId`、`channelId`、`bindingId`、`messageId`、`inputLength` |
 | `inbound_ignored` | 入站被过滤或忽略：渠道过滤失败、core 形态校验或身份键失败、出队前已过期、停机丢弃队列、出站隔离期间、入站处理器异常 | 渠道侧 `messageId`、`reason`、`outcome`、`attachmentCount`、`inputLength`；core 侧 `reason`，出队或丢队列路径另带 `requestId`、`bindingId`、`messageId`，形态校验路径带 `channelId`、`generation` |
-| `inbound_rejected` | 准入拒绝（core 非 `ready`、代次失效、store failed、容量超限），或拒绝提示未发出（回复窗口已过、独立发送槽已满） | core 侧 `channelId`、`generation`、`reason`，容量拒绝附 `requestId`、`bindingId`、`messageId`；渠道侧 `messageId`、`reason`，提示未发出时另带 `outcome` |
+| `inbound_rejected` | 准入拒绝（core 非 `ready`、代次失效、store failed、容量超限、入队时已过期），或拒绝提示未发出（回复窗口已过、独立发送槽已满） | core 侧 `channelId`、`generation`、`reason`，`admit` 拒绝附 `requestId`、`bindingId`、`messageId`；渠道侧 `messageId`、`reason`，提示未发出时另带 `outcome` |
 | `session_created` | 新建会话并提交映射 | `bindingId`、`sessionId`、`generation` |
 | `session_resumed` | 从映射恢复会话成功 | `bindingId`、`sessionId`、`generation` |
 | `session_recreated` | 恢复失败或持久 cwd 不一致，重建之前 | `bindingId`、旧 `sessionId`、旧 `generation`、`reason` |
@@ -97,7 +97,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `reply_sent`、`reply_partial`、`reply_unknown` | 投递报告分别为 `sent`、`partial`、`unknown` | 渠道投递报告 `messageId`、`deliveryMs`、`attempted`、`confirmed`；提示信封 `requestId`、`bindingId`、`messageId`、`attempted`、`confirmed`；turn 回复 `requestId`、`sessionId`、`turn`、`outputLength` |
 | `reply_failed` | 报告为 `failed`、`expired` 或 `closed`，`deliver` 抛错，回复规划降级，或拒绝提示发送失败 | `reason` 加路径相关字段：报告路径带 `messageId`，或 `requestId`、`sessionId`、`turn`，个别带 `bindingId`、`attempted`、`confirmed`；规划降级与提示发送失败只带 `messageId` |
 | `state_failed` | 映射 store 转 failed、core 进入 failed，或渠道 `setState` 抛错 | `error`（store）、`reason`（core 转 failed），或 `channelId`、`reason`（渠道） |
-| `state_warning` | 非致命告警：非法状态迁移、探针运行期错误、停机步骤抛错、目录 `fsync` 失败、逐出 handle 已释放但 session 仍 live、`stop` 抛错 | `reason`，部分带 `channelId`、`bindingId`、`sessionId` |
+| `state_warning` | 非致命告警：非法状态迁移、探针运行期错误、停机步骤抛错、目录 `fsync` 失败、逐出 handle 已释放但 session 仍 live、`stop` 抛错（含启动失败后 core 与 QQ 停止失败）、释放或取消清理时 flush 报无持久化监听者 | `reason`，部分带 `channelId`、`bindingId`、`sessionId`、`requestId`、`turn` |
 | `channel_reconnecting` | 渠道进入 `reconnecting` | `channelId`、`generation`；QQ 侧归因行另带 `reason` |
 | `manual_restart_required` | 需要人工介入，触发点见[状态机](#state-machines) | `reason`；部分带 `channelId`、`generation`，或 `bindingId`、`sessionId` |
 | `shutdown` | 停止协调器结束，或 QQ SDK 的 `start()` 在未停止渠道的情况下 resolve | 正常结束只有 `event` 与 `time`；预算耗尽时 `reason` 为 `budget_exhausted`；QQ 场景带 `channelId` 与 `reason` |

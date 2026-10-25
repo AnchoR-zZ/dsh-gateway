@@ -88,7 +88,7 @@ core 在 execute 开始时调用 `prepare({ identity, signal })`，准备与后�
 | 准备被中止 | 返回 `aborted`；已取得但未发布的 handle 在 `DISPOSE_WAIT_MS` 内尽力 dispose，不进缓存；映射若已提交则保留，本次不执行 |
 | 无法计算身份键 | 返回 `creation-failed`，不创建目录或 agent |
 
-创建与重建都先解析身份目录：校验 `bindingId` 形态，递归创建 `<workspaceRoot>/<bindingId>`，再对 workspace 根与目录做 `realpath`，要求目录等于根下的该键（Windows 比较忽略大小写）；目录经符号链接或 junction 指向边界外时拒绝并返回 `creation-failed`。重建复用现有目录，不删除目录内容。workspace 根的解析见 [workspace 与派生路径](../config.md#workspace-derivation)。
+创建与重建都先解析身份目录：校验 `bindingId` 形态，递归创建 `<workspaceRoot>/<bindingId>`，再对 workspace 根与目录做 `realpath`，按 `isSameOrUnder(已解析目录, 根/身份键)` 判定：身份键路径必须等于已解析目录或位于其内（Windows 比较忽略大小写）。该实参顺序把已解析目录当作祖先，因此解析到 workspace 根或其祖先目录的链接会通过校验，解析到其他边界外目录时拒绝并返回 `creation-failed`。重建复用现有目录，不删除目录内容。workspace 根的解析见 [workspace 与派生路径](../config.md#workspace-derivation)。
 
 新建与恢复都在 dsh 的 setup 阶段强制写入 `setApprovalPolicy('never')` 与 `setSandboxMode('workspace-write')`；两者是幂等 append，恢复的会话同样强制。模型选择在管理器构造时读取一次，之后所有 agent 共用，变更需要重启（宿主适配细节见 [宿主接入](../architecture.md#host-integration)）。
 
@@ -104,7 +104,7 @@ core 在 execute 开始时调用 `prepare({ identity, signal })`，准备与后�
 
 `maxLiveAgents` 同时是缓存条数上限和阻塞式准入上限（字段见 [配置字段](../config.md#config-fields)）。缓存已满时 prepare 先同步逐出 LRU 序号最小、状态为 `active` 且不 busy 的条目并异步释放；没有可逐出条目就等待容量事件或中止信号，中止返回 `aborted`。`releasing` 与 `stuck` 条目不可逐出。
 
-turn 以健康 handle 结束时 core 调用 `markIdle`：清 busy、刷新 TTL 与 LRU 序号并唤醒容量等待者；未知或已移除的 handle 是 no-op。busy 条目不会被 LRU 逐出，也不会被空闲回收器释放。
+turn 以健康 handle 结束时 core 调用 `markIdle`：清 busy、刷新 TTL 与 LRU 序号并唤醒容量等待者；未知、已移除或已转 `releasing`/`stuck` 的 handle 是 no-op（仅 `active` 条目清 busy、刷新时间戳并唤醒容量等待者）。busy 条目不会被 LRU 逐出，也不会被空闲回收器释放。
 
 回收器由 `start()` 启动、`stop()` 停止：默认检查周期为 `clamp(idleAgentTtlMs/4, 1000, 30000)` ms，判定只看单调时钟，`active`、不 busy 且 `lastUsedAt` 不晚于 `now - idleAgentTtlMs` 的条目走 `releaseHandle`（不带 cancel）。回收只释放 handle，不删除映射，也不删除 dsh 会话历史；`stop()` 只清定时器，停机释放由 core 逐个调用 `releaseHandle`。
 
@@ -122,3 +122,4 @@ handle 的所有权属于 session-manager，从 `createAgent`/`resumeAgent` 返�
 
 - 写事务超时后被放弃的底层写操作无法从 JS 取消，`flushNow()` 也不等待；失败事务的底层操作仍可能在失败后完成，留下临时文件或替换主文件，需要人工核对 `state/` 下的 `bindings.json`、`.bak` 与遗留 `.tmp-*`。
 - `stuck` 条目永久占用缓存名额且不会被逐出；缓存被 `stuck` 条目占满时，后续 `prepare` 只能等待容量直到执行预算中止并返回 `aborted`，恢复路径是重启进程。
+- 身份目录边界校验按 `isSameOrUnder(已解析目录, 根/身份键)` 判定，实参顺序把已解析目录当作祖先：指向 workspace 根、`<workspace>` 或其他祖先目录的 junction 会通过校验，该目录随后作为 agent 工作目录使用；需要"目录必须等于身份目录"时须调整参数顺序或改用相等判定。

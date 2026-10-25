@@ -20,7 +20,7 @@ start()
   -> bot.start() 挂起直到 stop；渠道挂拒绝处理器后台化，start() 随即返回
 ```
 
-注册渠道先于 SDK 构造：`channelId` 为 `qq`，`accountId` 为机器人 `AppID`。注册被 core 拒绝时（重复账号、core 状态或 `channelId`/`accountId` 不符合路径安全字符集），渠道记录 `manual_restart_required`、不构造 bot、不重试，并让 `qq.start()` 拒绝。
+注册渠道先于 SDK 构造：`channelId` 为 `qq`，`accountId` 为机器人 `AppID`。注册被 core 拒绝时（重复账号、core 状态、`channelId`/`accountId` 不符合路径安全字符集，或未提供 `stopReceiving` 函数），渠道记录 `manual_restart_required`、不构造 bot、不重试，并让 `qq.start()` 拒绝。
 
 SDK 构造参数如下：
 

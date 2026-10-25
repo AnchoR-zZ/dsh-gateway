@@ -6,7 +6,7 @@
 
 ## 回复规划
 
-每条通过入站过滤的消息在交给 core 之前创建一个回复端口，端口随 `InboundText.reply` 传递，一个端口最多消费一个 `ReplyEnvelope`。规划在第一个发送请求之前一次完成：`planReply` 是纯函数，输入最终正文、提示类型列表、条数上限与单条长度上限，输出按发送顺序排列的消息、`truncated` 与 `degraded`；它不做 IO、不依赖 SDK、不持有跨调用状态。
+每条通过入站过滤的消息在交给 core 之前创建一个回复端口，端口随 `InboundText.reply` 传递，一个端口最多消费一个 `ReplyEnvelope`。规划在第一个发送请求之前一次完成：`planReply` 是纯函数，输入最终正文、提示类型列表、条数上限与单条长度上限，输出按发送顺序排列的消息、`truncated` 与 `degraded`；它不做 IO、不依赖 SDK，输出只由输入决定（内部仅复用只读的 `Intl.Segmenter` 单例）。
 
 正文、提示与截断说明共享两个额度：`QQ_MAX_MESSAGES_PER_INBOUND`（4 条）与 `QQ_MESSAGE_MAX_LENGTH`（4000 UTF-16 code units）。下文以 `B` 表示条数预算、`L` 表示单条长度上限；端口以 `min(envelope.maxMessages, 4)` 作为 `B`，`L` 取 `QQ_MESSAGE_MAX_LENGTH`，`envelope` 只能把条数改小，不能放大。长度按字符串的 `length`（UTF-16 code units）量化，Markdown 标记、围栏与换行都计入，属于保守计数。
 
