@@ -10,11 +10,13 @@
 
 ## 文档导航
 
-- [架构与行为契约](docs/architecture.md)
-- [运行时配置契约](docs/architecture.md#config-contract)
-- [固定行为常量](docs/architecture.md#limits)
-- [健康探针与日志](docs/architecture.md#health-logs)
-- [Agent Notes](docs/notes/README.md) 与[模板](docs/notes/TEMPLATE.md)
+- [架构地图](docs/architecture.md)：运行组合、宿主接入、职责边界、消息流与扩展入口
+- [入站与 QQ 连接](docs/subsystems/inbound.md)：连接生命周期、渠道状态映射、入站过滤与回复窗口
+- [调度与 turn 控制](docs/subsystems/scheduling.md)：准入、排队、执行槽、turn 结果与超时
+- [会话与持久状态](docs/subsystems/session-state.md)：身份键、映射文件、写事务、会话准备与回收
+- [回复规划与投递](docs/subsystems/outbound.md)：切分与预算、提示顺序、投递状态与出站隔离
+- [配置与固定常量](docs/config.md)：配置文件字段、workspace 解析与 `GATEWAY_LIMITS`
+- [健康、状态与日志](docs/observability.md)：探针、状态机、日志事件与脱敏
 
 ## 环境
 
@@ -84,7 +86,7 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 }
 ```
 
-字段的默认值、校验规则和运行时语义见 [配置契约](docs/architecture.md#config-contract)，本页不复述完整表。首次启动时若文件不存在，网关会创建包含空 QQ 凭证和默认值的模板，随后因缺少凭证而启动失败；填入 `qqAppId` 与 `qqAppSecret` 后重启即可。已有文件绝不覆盖或自动修复，未知字段、`null`、类型错误和无效值一律拒绝启动。
+字段的默认值、校验规则和运行时语义见 [配置契约](docs/config.md#config-fields)，本页不复述完整表。首次启动时若文件不存在，网关会创建包含空 QQ 凭证和默认值的模板，随后因缺少凭证而启动失败；填入 `qqAppId` 与 `qqAppSecret` 后重启即可。已有文件绝不覆盖或自动修复，未知字段、`null`、类型错误和无效值一律拒绝启动。
 
 配置文件包含明文 QQ AppSecret，当前不做文件权限检查或加密。部署方应把 workspace 放在仓库外（默认值已满足），并通过文件系统 ACL 限制为服务账号与管理员可读；`gateway.config.json` 已加入 `.gitignore`，不得提交。
 
@@ -96,11 +98,11 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 | `DEEPSEEK_API_KEY` | 使用默认 provider 时必需 | dsh 模型 provider 按凭证引用读取；其他 provider 按 dsh 配置 |
 | `DSH_TELEMETRY_DISABLED` | 部署固定为 `1` | 禁止 dsh 会话遥测外发；bundle 同时禁用遥测插件 |
 
-模型选择由 `<DSH_HOME>/profiles/gateway/cordis.patch.yml` 中的 `agent-default-model` 行决定。网关启动时读取一次 `ctx.agentDefaultModel.currentSelection()`，所有新建和恢复的 agent 共用该选择；不提供按用户选模。启动摘要会记录实际 provider 与 model。超时、回复条数与消息长度属于固定行为契约，不提供配置项绕过；对应常量集中在 [`GATEWAY_LIMITS`](docs/architecture.md#limits)。
+模型选择由 `<DSH_HOME>/profiles/gateway/cordis.patch.yml` 中的 `agent-default-model` 行决定。网关启动时读取一次 `ctx.agentDefaultModel.currentSelection()`，所有新建和恢复的 agent 共用该选择；不提供按用户选模。启动摘要会记录实际 provider 与 model。超时、回复条数与消息长度属于固定行为契约，不提供配置项绕过；对应常量集中在 [`GATEWAY_LIMITS`](docs/config.md#gateway-limits)。
 
 ## 部署与启动
 
-以下命令用于正式部署。部署方需先安装精确版本的 dsh，并在同一台机器上准备 Node、pnpm、受限 `.env` 与 QQ 机器人凭证；安装、检查与正式启动必须使用相同的 `.env`、`DSH_HOME` 和 workspace。自动测试不覆盖真实 dsh 宿主、QQ 网络与模型认证，本次文档更新也没有重新执行这些命令；实际环境差异以运行结果为准。
+以下命令用于正式部署。部署方需先安装精确版本的 dsh，并在同一台机器上准备 Node、pnpm、受限 `.env` 与 QQ 机器人凭证；安装、检查与正式启动必须使用相同的 `.env`、`DSH_HOME` 和 workspace。自动测试不覆盖真实 dsh 宿主、QQ 网络与模型认证，这些命令也不在自动测试覆盖内；实际结果以运行输出为准。
 
 `.env` 只保存 dsh 变量和可选的 `DSH_GATEWAY_WORKSPACE`，例如：
 
@@ -151,7 +153,7 @@ secrets/.env                       # dsh 变量与可选 workspace 路径，不�
 
 ### 停止与重启
 
-正常停止在运行终端按 Ctrl+C 并等待原进程结束；修改配置或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。日志出现 `manual_restart_required` 表示进入需人工介入的状态，先确认旧进程已结束，按日志修复后重启；触发点、failed 吸收态与处置边界见[健康与日志](docs/architecture.md#health-logs)。
+正常停止在运行终端按 Ctrl+C 并等待原进程结束；修改配置或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。日志出现 `manual_restart_required` 表示进入需人工介入的状态，先确认旧进程已结束，按日志修复后重启；触发点、failed 吸收态与处置边界见[健康与日志](docs/observability.md#state-machines)。
 
 映射文件损坏或版本不支持时停止进程、保留现场修复或从备份恢复，不以空状态目录覆盖启动。`.bak` 只用于停止进程后的人工恢复；恢复前核对 revision 与对应 session 记录，避免静默复活已替换映射。网关不提供自动迁移，升级 schema 需要显式迁移。
 
@@ -160,7 +162,7 @@ secrets/.env                       # dsh 变量与可选 workspace 路径，不�
 先决条件：确认目标 `user_openid` 对应的 `bindingId`（QQ 下为 `qq_<AppID>_<user_openid>`），停止 dsh 并确认旧进程退出，备份 `<workspace>/state/bindings.json`、其 `.bak` 与必要的 `<DSH_HOME>/sessions`。聊天侧没有 `/new` 或重置命令；只删除目标映射记录，下次输入才会创建新 session ID。
 
 1. 在运行终端按 Ctrl+C 停止 dsh，确认原进程已退出，再编辑状态文件。
-2. 在 `<workspace>/state/bindings.json` 中按 `channelId`、`accountId`、`peerId` 定位唯一条目，只删除 `bindings["qq_<AppID>_<user_openid>"]`，保留其他用户，并把文件级 `revision` 加一，不改 `schemaVersion`；不要用文本替换匹配相似 ID。字段规则见 [会话与状态](docs/architecture.md#session-state)。
+2. 在 `<workspace>/state/bindings.json` 中按 `channelId`、`accountId`、`peerId` 定位唯一条目，只删除 `bindings["qq_<AppID>_<user_openid>"]`，保留其他用户，并把文件级 `revision` 加一，不改 `schemaVersion`；不要用文本替换匹配相似 ID。字段规则见 [映射文件](docs/subsystems/session-state.md#bindings-file)。
 3. 保存后用 JSON 解析检查文件，例如：
 
 ```powershell
@@ -169,7 +171,7 @@ Get-Content -LiteralPath '<workspace>/state/bindings.json' -Encoding utf8 -Raw |
 
 4. 使用相同 `.env`、`DSH_HOME` 与 workspace 重启。目标用户下次发消息时应出现新 session ID，其他用户继续恢复原 ID。
 
-加一是为了保持后续写入的递增语义；字段与校验规则见[会话与状态](docs/architecture.md#session-state)。旧 dsh 会话历史、旧网关日志和该用户工作目录均保留；不删除、改名或手写 session 文件。该操作只清空未来模型上下文，不清除工具生成文件或已经发生的外部副作用，也不补发宕机期间的旧消息。
+加一是为了保持后续写入的递增语义；字段与校验规则见[映射文件](docs/subsystems/session-state.md#bindings-file)。旧 dsh 会话历史、旧网关日志和该用户工作目录均保留；不删除、改名或手写 session 文件。该操作只清空未来模型上下文，不清除工具生成文件或已经发生的外部副作用，也不补发宕机期间的旧消息。
 
 ## 安全与已知边界
 
@@ -180,4 +182,4 @@ Get-Content -LiteralPath '<workspace>/state/bindings.json' -Encoding utf8 -Raw |
 - 映射持久化失败会使 core 进入 failed 并停止准入；dispose 未收敛、出站隔离或停机预算耗尽需要人工重启。
 - `workspace-write` 主要约束写入目录，不构成对宿主文件读取、网络或进程权限的完整租户隔离。默认审批策略为 `never`，需要审批的操作直接拒绝，不提供聊天侧审批。
 - `gateway.config.json` 以明文保存 AppSecret；`.env` 保存模型凭证。两者都不得入库，部署方需限制文件 ACL 并避免进入 agent 可写目录。
-- 初版不提供聊天侧取消、上下文重置或模型选择；这些操作只能通过停止进程、修改配置/映射并重启完成。
+- 当前不提供聊天侧取消、上下文重置或模型选择；这些操作只能通过停止进程、修改配置/映射并重启完成。
