@@ -2,14 +2,14 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createGatewayConfigTemplate, GatewayConfigError } from '../src/config.js'
-import type { GatewayConfigFile } from '../src/config.js'
+import { createGatewayConfigTemplate, GatewayConfigError } from '../src/config/schema.js'
+import type { GatewayConfigFile } from '../src/config/schema.js'
 import {
   GATEWAY_CONFIG_FILENAME,
   GatewayConfigConflictError,
   loadGatewayConfigStore,
-} from '../src/config-file.js'
-import type { GatewayConfigStore } from '../src/config-file.js'
+} from '../src/config/store.js'
+import type { GatewayConfigStore } from '../src/config/store.js'
 
 /**
  * 配置文件加载与热更新测试：模板创建（不再失败退出）、v2 加载、v1→v2 迁移写回与幂等、

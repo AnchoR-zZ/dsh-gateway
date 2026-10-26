@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import { GATEWAY_LIMITS } from '../src/contracts.js'
-import { normalizeC2CMessage } from '../src/qq/inbound.js'
-import type { NormalizeC2CInput } from '../src/qq/inbound.js'
+import { normalizeC2CMessage } from '../src/channels/qq/inbound.js'
+import type { NormalizeC2CInput } from '../src/channels/qq/inbound.js'
 
 /**
  * 5.2 入站准入矩阵：每格一例。全部用字面量构造，不接触 SDK；

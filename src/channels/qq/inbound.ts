@@ -1,11 +1,11 @@
-import { GATEWAY_LIMITS, isValidBindingPeer } from '../contracts.js'
+import { GATEWAY_LIMITS, isValidBindingPeer } from '../../contracts.js'
 
 /**
  * QQ 入站纯过滤（设计文档 5.2）：把 SDK 归一化的入站消息按准入顺序 1-5 转为规范
  * C2C 文本消息，或携带原因的拒绝结论。无 IO、不导入 SDK；字段一律按 unknown 接收并
  * 在此逐项校验，不把缺失字段补成默认值，也不根据 content 猜测类型。
  *
- * 入口签名刻意镜像 SDK 的 QQBotInboundMessage 形状，组装层（src/qq/index.ts）只做
+ * 入口签名刻意镜像 SDK 的 QQBotInboundMessage 形状，组装层（src/channels/qq/index.ts）只做
  * 字段搬运；测试直接构造字面量即可覆盖 5.2 的完整矩阵。
  */
 

@@ -1,6 +1,6 @@
 # 配置与固定常量
 
-本页描述网关的运行配置：`<workspace>/gateway.config.json` 的 v2 字段、校验与默认值，v1 的自动迁移，热生效范围与写冲突规则，workspace 的解析与派生路径，以及 `GATEWAY_LIMITS` 固定行为常量；映射文件格式见 [映射文件](subsystems/session-state.md#bindings-file)，健康与日志见 [健康探针](observability.md#readiness) 与 [日志事件](observability.md#log-events)，channel 管理命令见 [README](../README.md) 与 [channel 管理](subsystems/channel-admin.md)，部署命令见 [README](../README.md)。源码：[`src/config.ts`](../src/config.ts)、[`src/config-file.ts`](../src/config-file.ts) 与 [`src/contracts.ts`](../src/contracts.ts)。
+本页描述网关的运行配置：`<workspace>/gateway.config.json` 的 v2 字段、校验与默认值，v1 的自动迁移，热生效范围与写冲突规则，workspace 的解析与派生路径，以及 `GATEWAY_LIMITS` 固定行为常量；映射文件格式见 [映射文件](subsystems/session-state.md#bindings-file)，健康与日志见 [健康探针](observability.md#readiness) 与 [日志事件](observability.md#log-events)，channel 管理命令见 [README](../README.md) 与 [channel 管理](subsystems/channel-admin.md)，部署命令见 [README](../README.md)。源码：[`src/config/schema.ts`](../src/config/schema.ts)、[`src/config/store.ts`](../src/config/store.ts) 与 [`src/contracts.ts`](../src/contracts.ts)。
 
 <a id="config-fields"></a>
 
@@ -8,7 +8,7 @@
 
 网关配置固定为 `<workspace>/gateway.config.json`（`GATEWAY_CONFIG_FILENAME`），UTF-8 JSON；它是网关唯一自有的持久配置来源。插件 config 无字段（`Config` 是空 schema，`apply` 不读取第二个参数）；除 `DSH_GATEWAY_WORKSPACE` 与 dsh home 路径外，全部网关配置都来自该文件。
 
-文件在插件启动时同步读取一次；channel 实例的添加、启用与凭证变更经本机管理路由热生效（见 [热生效范围](#hot-reload-scope)），其余字段修改需要重启进程；`debug` 在创建日志器时固定，同样需要重启。
+文件在插件组装期（`apply` 返回前，由 runtime 同步）读取一次；channel 实例的添加、启用与凭证变更经本机管理路由热生效（见 [热生效范围](#hot-reload-scope)），其余字段修改需要重启进程；`debug` 在创建日志器时固定，同样需要重启。
 
 加载顺序固定为：workspace 与 dsh home 的绝对路径校验 → 重叠校验 → 递归创建 workspace 目录 → 读取或创建配置文件 → 剥离 UTF-8 BOM 后 `JSON.parse` → v1 检测（见 [v1 迁移](#v1-migration)）→ v2 严格校验 → 派生路径。任一步失败都抛 `GatewayConfigError`，插件加载失败、dsh 终止启动；错误消息指明文件路径、字段名（或环境变量名）与原因，且不回显 `appSecret` 的值。
 
@@ -59,9 +59,9 @@
 
 ## 热生效范围与写冲突
 
-channel 实例的添加（含重复 `add` 更新 secret）、启用与凭证变更经本机管理路由热生效，不重启进程（路由契约见 [channel 管理](subsystems/channel-admin.md)）；其余字段（`debug`、`maxConcurrent` 等 limits 与回收参数）不在热生效范围，修改走重启。冷启动路径保留：重启后按已保存配置自动上线全部 `enabled` 实例。
+channel 实例的添加（含重复 `add` 更新 secret）、启用与凭证变更经本机 HTTP 管理路由（管理服务）热生效，不重启进程（路由契约见 [channel 管理](subsystems/channel-admin.md)）；其余字段（`debug`、`maxConcurrent` 等 limits 与回收参数）不在热生效范围，修改走重启。冷启动路径保留：重启后按已保存配置自动上线全部 `enabled` 实例；停机期间已保存的实例配置保留但不启动，等下一次启动生效。
 
-进程是配置文件唯一在线写者：加载时记录"最后已知文件内容"快照，管理路由写前重读磁盘，内容与快照不一致（文件被外部修改且进程未重启）时拒绝写入并返回 409，绝不静默覆盖；处置方式是重启 dsh 或把文件改回快照内容。写回一律走同目录临时文件 + rename 的原子替换，成功后更新快照，不残留 `.tmp` 文件。手工编辑配置后重启 dsh 仍是合法的冷路径；移除 bot 本期无命令，同样走手工编辑 + 重启。
+进程是配置文件唯一在线写者：加载时记录"最后已知文件内容"快照，每次管理写入前由 store 重读磁盘，内容与快照不一致（文件被外部修改且进程未重启）时拒绝写入并返回 409，绝不静默覆盖；处置方式是重启 dsh 或把文件改回快照内容。写回一律走同目录临时文件 + rename 的原子替换，成功后更新快照，不残留 `.tmp` 文件。手工编辑配置后重启 dsh 仍是合法的冷路径；移除 bot 本期无命令，同样走手工编辑 + 重启。
 
 配置文件含明文 `appSecret`，网关不做文件权限检查或加密；把 workspace 放在仓库外、限制 ACL 与不得提交的要求见 [README](../README.md)。
 
@@ -87,7 +87,7 @@ dsh home 不来自环境变量，而是启动时从 dsh 根上下文的 `dshHome
 
 ## 固定行为常量
 
-以下常量集中在 [`src/contracts.ts`](../src/contracts.ts) 的 `GATEWAY_LIMITS`，是行为契约：没有对应的配置字段或环境变量覆盖，总装时注入各组件（见 [运行组合](architecture.md#composition)），改动需要修改源码并重启进程。
+以下常量集中在 [`src/contracts.ts`](../src/contracts.ts) 的 `GATEWAY_LIMITS`，是行为契约：没有对应的配置字段或环境变量覆盖，runtime 总装时注入各组件（见 [运行组合](architecture.md#composition)），改动需要修改源码并重启进程。
 
 | 常量 | 值 | 用途 |
 |---|---|---|
@@ -104,7 +104,7 @@ dsh home 不来自环境变量，而是启动时从 dsh 根上下文的 `dshHome
 | `DISPOSE_WAIT_MS` | 5000 ms | dispose 的等待时间上限 |
 | `CANCEL_CLEANUP_BUDGET_MS` | 10000 ms | 取消清理总预算，停稳、flush 与 dispose 共用，不按步骤追加 |
 | `STOP_NATURAL_COMPLETION_WAIT_MS` | 5000 ms | 正常停止时等待运行中 `execute` 自然结束的窗口，超时才中断 |
-| `CORE_SHUTDOWN_BUDGET_MS` | 25000 ms | core 停止协调器总预算；超限记录 `manual_restart_required` |
+| `CORE_SHUTDOWN_BUDGET_MS` | 25000 ms | runtime 停机总预算：并行等待管理在途操作、core 停止与全部实例停止的上限；core 停止协调器内部也以同一值约束各步骤。任一侧超限记录 `manual_restart_required` 并结束有界等待 |
 
 触发条件与后果见 [回复窗口与时间](subsystems/inbound.md#reply-window)、[调度](subsystems/scheduling.md#scheduler)、[超时、取消与清理](subsystems/scheduling.md#cancellation)、[写事务与故障](subsystems/session-state.md#write-transaction) 与 [投递](subsystems/outbound.md#reply-port)。
 

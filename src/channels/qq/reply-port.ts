@@ -1,5 +1,5 @@
-import type { DeliveryReport, GATEWAY_LIMITS, ReplyEnvelope, ReplyPort } from '../contracts.js'
-import type { GatewayLogger } from '../logging.js'
+import type { DeliveryReport, GATEWAY_LIMITS, ReplyEnvelope, ReplyPort } from '../../contracts.js'
+import type { GatewayLogger } from '../../logging.js'
 import { planReply } from './markdown.js'
 
 /**

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { join, sep } from 'node:path'
 
-import type { GatewayConfig } from '../config.js'
 import { computeBindingId, GATEWAY_LIMITS, isValidBindingId } from '../contracts.js'
 import type { ChannelIdentity } from '../contracts.js'
 import type { GatewayLogger } from '../logging.js'
@@ -12,7 +11,7 @@ import type { StateStore } from './state-store.js'
  * core/session-manager：bindingId 到 dsh agent 的创建、恢复、复用、重建、LRU 缓存与释放
  * （设计文档 3.2、6.3、7.4、7.5、9.2、11.2）。它是 core 与 dsh 的唯一桥接点——本模块只定义
  * 并消费 AgentHost 端口（Like 接口，自包含），不 import 任何 @deepseek-ai/* 运行时代码；
- * 真实实现由插件入口（宿主接缝）提供，测试注入替身。
+ * 真实实现由 host/dsh.ts 提供、runtime.ts 注入，测试注入替身。
  *
  * 所有权契约（3.2）：create/resume 返回的 handle 由本模块独占保存到其异步 dispose 结束；
  * `isAgentLive` 只是 live registry 的只读探针，不取得释放权。所有 handle 的取消、停稳、
@@ -67,7 +66,7 @@ export interface ResumeAgentInput {
 export type AgentModelOptions = Readonly<{ provider: string; model: string; reasoningEffort?: string }>
 
 /**
- * dsh 宿主端口。真实实现（插件入口任务）负责：在 setup 内执行 setApprovalPolicy('never')
+ * dsh 宿主端口。真实实现（host/dsh.ts）负责：在 setup 内执行 setApprovalPolicy('never')
  * 与 setSandboxMode('workspace-write')（幂等 append，恢复亦强制）；对同一 session 的并发
  * flush 做 in-flight 复用（只发一次）；isAgentLive 封装 ctx.agents.get(sessionId)。
  */
@@ -88,7 +87,7 @@ export interface PreparedSession {
   sessionId: string
   generation: number
   handle: AgentHandleLike
-  /** 本次准备中重建过会话（恢复失败→新建），T9 据此加一次性恢复提示（7.5）。 */
+  /** 本次准备中重建过会话（恢复失败→新建），core/index.ts 据此加一次性恢复提示（7.5）。 */
   recreated: boolean
   /** 命中健康缓存 handle（日志与诊断用）。 */
   reusedCached: boolean
@@ -109,7 +108,7 @@ export interface PrepareOptions {
   signal: AbortSignal
 }
 
-/** 会话管理器；生命周期由 core/lifecycle 持有（start/stop 控制空闲回收器）。 */
+/** 会话管理器；空闲回收器的启停由 core/index.ts 的启动与停止管道驱动。 */
 export interface SessionManager {
   /**
    * 准备（或复用）identity 对应的 agent。不抛常规错误：失败以返回值区分，内部意外异常
@@ -133,10 +132,10 @@ export interface SessionManager {
   ): Promise<'disposed' | 'timeout'>
   /** 启动空闲回收器（幂等）：周期释放空闲超过 idleAgentTtlMs 的 entry（无 cancel）。 */
   start(): void
-  /** 停止回收器定时器（幂等）；不主动释放 handle——停机释放由 core 停止协调器逐 entry 调 releaseHandle。 */
+  /** 停止回收器定时器（幂等）；不主动释放 handle——停机释放由 core/index.ts 的停止协调器逐 entry 调 releaseHandle。 */
   stop(): Promise<void>
   /**
-   * T9 增量缝隙：枚举缓存全部条目的 handle（含 releasing 与 stuck）供停机协调器逐个
+   * core/index.ts 停止管道用的增量入口：枚举缓存全部条目的 handle（含 releasing 与 stuck）供停机协调器逐个
    * releaseHandle。只读探针，不取得所有权；stuck 条目的 releaseHandle 立即返回
    * 'timeout'（其 manual_restart_required 已在转 stuck 时记录）。
    */
@@ -184,11 +183,18 @@ function errorMessage(error: unknown): string {
   return String(error)
 }
 
+/** 会话管理器参数：由总装注入，core 不依赖 GatewayConfig；构造后不变。 */
+export interface SessionManagerConfig {
+  readonly idleAgentTtlMs: number
+  readonly maxLiveAgents: number
+  readonly maxConcurrent: number
+}
+
 export function createSessionManager(options: {
   host: AgentHost
   store: StateStore
   workspaceRoot: string
-  config: Pick<GatewayConfig, 'idleAgentTtlMs' | 'maxLiveAgents' | 'maxConcurrent'>
+  config: SessionManagerConfig
   limits: typeof GATEWAY_LIMITS
   logger: GatewayLogger
   /** sessionId 生成器；默认 randomUUID，测试注入确定性序列。 */

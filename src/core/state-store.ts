@@ -15,7 +15,7 @@ import type { GatewayLogger } from '../logging.js'
  * 只能重建 store——持久映射不可用时不能继续处理新消息（7.3）。
  */
 
-/** 当前唯一支持的映射 schema 版本；未知版本在 load 时拒绝启动。T10 启动摘要日志引用。 */
+/** 当前唯一支持的映射 schema 版本；未知版本在 load 时拒绝启动。runtime.ts 启动摘要引用。 */
 export const SCHEMA_VERSION = 1
 
 /** 映射文件中 bindings 值的形状；全部字段由调用方提供，store 不代填业务字段（含时间戳）。 */
@@ -36,7 +36,7 @@ export interface BindingsSnapshot {
   readonly bindings: Readonly<Record<string, BindingRecord>>
 }
 
-/** 映射持久层；生命周期由 core/lifecycle 持有，failed 后只能重建，不能复用。 */
+/** 映射持久层；load 与 flush 由 core/index.ts 的启动与停止管道驱动，failed 后只能重建，不能复用。 */
 export interface StateStore {
   /**
    * 读取并校验 `<stateDir>/bindings.json`。目录或文件不存在视为首次部署，初始化内存空状态，

@@ -1,6 +1,6 @@
 # 回复规划与投递
 
-本页描述 QQ 渠道的回复规划、提示合并与投递语义，以及发送超时后的渠道出站隔离；入站过滤与被动回复窗口见 [入站过滤](inbound.md#inbound-filter)，turn 终态与截止时间见 [turn 执行](scheduling.md#turn-runner) 与 [超时、取消与清理](scheduling.md#cancellation)，日志事件见 [日志事件](../observability.md#log-events)。源码：[`src/qq/markdown.ts`](../../src/qq/markdown.ts)、[`src/qq/reply-port.ts`](../../src/qq/reply-port.ts)、[`src/qq/index.ts`](../../src/qq/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
+本页描述 QQ 渠道的回复规划、提示合并与投递语义，以及发送超时后的渠道出站隔离；入站过滤与被动回复窗口见 [入站过滤](inbound.md#inbound-filter)，turn 终态与截止时间见 [turn 执行](scheduling.md#turn-runner) 与 [超时、取消与清理](scheduling.md#cancellation)，日志事件见 [日志事件](../observability.md#log-events)。源码：[`src/channels/qq/markdown.ts`](../../src/channels/qq/markdown.ts)、[`src/channels/qq/reply-port.ts`](../../src/channels/qq/reply-port.ts)、[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
 
 <a id="reply-planning"></a>
 

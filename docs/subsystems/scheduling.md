@@ -1,6 +1,6 @@
 # 调度与 turn 控制
 
-本页描述网关核心如何接纳入站、排队与出队、分配全局执行槽，以及单个 turn 从准备、事件观察到最终文本选择、终态、超时、取消与清理的契约；入站字段过滤与 QQ 连接见 [入站与 QQ 连接](inbound.md#inbound-filter)，会话准备与重建见 [会话与持久状态](session-state.md#prepare)，提示与投递分别见 [提示与顺序](outbound.md#notice-order) 与 [投递](outbound.md#reply-port)，状态机见 [状态机](../observability.md#state-machines)、日志字段见 [日志事件](../observability.md#log-events)，`maxConcurrent` 等配置字段见 [配置与固定常量](../config.md#config-fields)。源码：[`src/core/index.ts`](../../src/core/index.ts)、[`src/core/scheduler.ts`](../../src/core/scheduler.ts)、[`src/core/turn-runner.ts`](../../src/core/turn-runner.ts)、[`src/index.ts`](../../src/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
+本页描述网关核心如何接纳入站、排队与出队、分配全局执行槽，以及单个 turn 从准备、事件观察到最终文本选择、终态、超时、取消与清理的契约；入站字段过滤与 QQ 连接见 [入站与 QQ 连接](inbound.md#inbound-filter)，会话准备与重建见 [会话与持久状态](session-state.md#prepare)，提示与投递分别见 [提示与顺序](outbound.md#notice-order) 与 [投递](outbound.md#reply-port)，状态机见 [状态机](../observability.md#state-machines)、日志字段见 [日志事件](../observability.md#log-events)，`maxConcurrent` 等配置字段见 [配置与固定常量](../config.md#config-fields)。源码：[`src/core/index.ts`](../../src/core/index.ts)、[`src/core/scheduler.ts`](../../src/core/scheduler.ts)、[`src/core/turn-runner.ts`](../../src/core/turn-runner.ts)、[`src/host/dsh.ts`](../../src/host/dsh.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
 
 <a id="ingress-admission"></a>
 

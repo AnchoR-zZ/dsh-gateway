@@ -14,12 +14,12 @@ import {
   parseGatewayConfigDocument,
   resolveGatewayWorkspace,
   serializeGatewayConfigFile,
-} from '../src/config.js'
-import type { GatewayConfigFile } from '../src/config.js'
+} from '../src/config/schema.js'
+import type { GatewayConfigFile } from '../src/config/schema.js'
 
 /**
  * 纯函数配置测试：workspace 环境变量解析、v2 配置文件文档校验、v1→v2 迁移、模板与派生
- * 路径。不触碰文件系统；文件读取/模板创建/迁移写回/漂移检测在 tests/config-file.test.ts。
+ * 路径。不触碰文件系统；文件读取/模板创建/迁移写回/漂移检测在 tests/config-store.test.ts。
  */
 
 const CONFIG_PATH = 'D:/dsh-gateway/gateway.config.json'

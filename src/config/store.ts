@@ -9,11 +9,11 @@ import {
   migrateLegacyGatewayConfigDocument,
   parseGatewayConfigDocument,
   serializeGatewayConfigFile,
-} from './config.js'
-import type { GatewayConfig, GatewayConfigFile } from './config.js'
+} from './schema.js'
+import type { GatewayConfig, GatewayConfigFile } from './schema.js'
 
 /**
- * config-file：读取 `<workspace>/gateway.config.json`，首次缺失时写入 v2 模板，检测到 v1
+ * config/store：读取 `<workspace>/gateway.config.json`，首次缺失时写入 v2 模板，检测到 v1
  * 文档时自动迁移并写回，并校验 workspace 与 dsh home 不重叠。
  *
  * 进程是配置文件唯一在线写者：store 维护"最后已知文件内容"快照，`update` 写前重读磁盘做

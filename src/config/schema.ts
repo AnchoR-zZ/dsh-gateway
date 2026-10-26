@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { isValidBindingScope } from './contracts.js'
+import { isValidBindingScope } from '../contracts.js'
 
 /**
  * 网关配置：唯一环境变量 `DSH_GATEWAY_WORKSPACE` 加 `<workspace>/gateway.config.json`。
@@ -12,7 +12,7 @@ import { isValidBindingScope } from './contracts.js'
  *
  * schemaVersion 2：QQ 凭证移入 `channels.qq` 实例数组，每个实例以 `appId` 标识并携带独立的
  * `enabled` 开关；数组可为空（未配置任何 bot）。检测到 schemaVersion 1 的旧文档时由
- * config-file.ts 自动迁移为 v2 并写回（单向）。本模块保持无文件 IO。
+ * config/store.ts 自动迁移为 v2 并写回（单向）。本模块保持无文件 IO。
  */
 
 /** 配置文件当前唯一支持的 schema 版本。 */
@@ -342,7 +342,7 @@ const LEGACY_CONFIG_FIELDS = new Set([
  * `channels.qq[0]`（`enabled: true`），其余字段沿用。`qqAppId` 与 `qqAppSecret` 双双为
  * trim 后的空串（旧版首启模板形态）时无凭证可迁，产物为 `channels.qq: []`（零实例），
  * 升级后以零实例正常启动。恰好一个为空、一个非空属真实配置错误，照常拒绝。转换是纯函数，
- * 写回由 config-file.ts 负责；v1 文档本身非法（单空凭证、未知字段等）时抛
+ * 写回由 config/store.ts 负责；v1 文档本身非法（单空凭证、未知字段等）时抛
  * GatewayConfigError 且不产生转换结果。
  */
 export function migrateLegacyGatewayConfigDocument(value: unknown, configPath: string): GatewayConfigFile {

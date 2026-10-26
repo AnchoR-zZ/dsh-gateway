@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_GATEWAY_ADMIN_PORT, parseChannelCommand, runChannelCommand } from '../src/cli.js'
+import { parseChannelCommand, runChannelCommand } from '../src/cli.js'
+import { DEFAULT_GATEWAY_HTTP_PORT } from '../src/http/protocol.js'
 import type { ChannelCommand, CliIO } from '../src/cli.js'
 
 /**
@@ -71,7 +72,7 @@ describe('parseChannelCommand', () => {
       appId: undefined,
       appSecret: undefined,
       force: false,
-      port: DEFAULT_GATEWAY_ADMIN_PORT,
+      port: DEFAULT_GATEWAY_HTTP_PORT,
     })
   })
 
@@ -79,7 +80,7 @@ describe('parseChannelCommand', () => {
     expect(parseChannelCommand(['channel', 'enable', 'qq'])).toEqual({
       kind: 'enable',
       appId: undefined,
-      port: DEFAULT_GATEWAY_ADMIN_PORT,
+      port: DEFAULT_GATEWAY_HTTP_PORT,
     })
     expect(parseChannelCommand(['channel', 'enable', 'qq', '--app-id', 'app-2', '--port', '9'])).toEqual({
       kind: 'enable',
@@ -154,7 +155,7 @@ describe('runChannelCommand', () => {
 
     expect(code).toBe(0)
     expect(io.requests).toHaveLength(1)
-    expect(io.requests[0]!.url).toBe(`http://127.0.0.1:${DEFAULT_GATEWAY_ADMIN_PORT}/channels/qq`)
+    expect(io.requests[0]!.url).toBe(`http://127.0.0.1:${DEFAULT_GATEWAY_HTTP_PORT}/channels/qq`)
     expect(io.requests[0]!.init.method).toBe('POST')
     expect(io.requests[0]!.init.headers['content-type']).toBe('application/json')
     expect(JSON.parse(io.requests[0]!.init.body)).toEqual({ appId: 'app-1', appSecret: 'secret-1', force: true })

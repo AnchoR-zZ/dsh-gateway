@@ -1,5 +1,5 @@
 import { Lexer } from 'marked'
-import type { NoticeKind } from '../contracts.js'
+import type { NoticeKind } from '../../contracts.js'
 
 /**
  * QQ 回复规划纯函数（设计文档 10.1、10.2）：把最终正文与提示类型规划为实际发送的

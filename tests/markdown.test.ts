@@ -4,8 +4,8 @@ import {
   PLAN_FAILURE_TEXT,
   TRUNCATED_TEXT,
   planReply,
-} from '../src/qq/markdown.js'
-import type { PlanInput } from '../src/qq/markdown.js'
+} from '../src/channels/qq/markdown.js'
+import type { PlanInput } from '../src/channels/qq/markdown.js'
 
 const L = 4000
 const B = 4

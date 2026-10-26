@@ -3,10 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { GATEWAY_LIMITS } from '../src/contracts.js'
 import type { ReplyEnvelope } from '../src/contracts.js'
 import type { GatewayLogEvent, GatewayLogger, LogFields } from '../src/logging.js'
-import { NOTICE_TEXTS, PLAN_FAILURE_TEXT, planReply } from '../src/qq/markdown.js'
-import type { ReplyPlan } from '../src/qq/markdown.js'
-import { createQQReplyPort, SEND_TIMED_OUT } from '../src/qq/reply-port.js'
-import type { QQSender, ReplyPortLimits } from '../src/qq/reply-port.js'
+import { NOTICE_TEXTS, PLAN_FAILURE_TEXT, planReply } from '../src/channels/qq/markdown.js'
+import type { ReplyPlan } from '../src/channels/qq/markdown.js'
+import { createQQReplyPort, SEND_TIMED_OUT } from '../src/channels/qq/reply-port.js'
+import type { QQSender, ReplyPortLimits } from '../src/channels/qq/reply-port.js'
 
 /**
  * reply-port 行为（设计 4.2/4.3/10.3）：规划 → 逐段发送 → 预算/期限/未知结果。

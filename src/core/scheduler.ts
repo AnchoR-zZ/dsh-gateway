@@ -1,6 +1,5 @@
 import { Buffer } from 'node:buffer'
 
-import type { GatewayConfig } from '../config.js'
 import type { ReplyPort } from '../contracts.js'
 import { GATEWAY_LIMITS } from '../contracts.js'
 import type { GatewayLogger } from '../logging.js'
@@ -20,13 +19,13 @@ import type { GatewayLogger } from '../logging.js'
  * 窗口判定用注入的墙钟 now()（匹配平台截止时间；进程内耗时与 turn 计时归 turn-runner 的
  * 单调时钟）。FIFO 为空且无执行中任务时移除该用户的临时调度条目（持久映射在 state-store，
  * 与此无关）。正常停止只丢弃尚未执行的内存队列（9.3：不为排队消息逐条发送停机广播，丢弃经
- * onStopDropped 回调由组装层决定如何记录与关闭 port）；运行中任务不受影响，槽位由其执行
+ * onStopDropped 回调由 core/index.ts 决定如何记录与关闭 port）；运行中任务不受影响，槽位由其执行
  * promise 自然释放。
  */
 
 /** 已接受、尚未执行完成的任务；seq 由 scheduler 在接受时同步分配（全局递增接受序号，6.1）。 */
 export interface QueuedTask {
-  /** 调用方（core 组装层）生成的请求标识。 */
+  /** 调用方（core/index.ts）生成的请求标识。 */
   readonly requestId: string
   /** 唯一会话键（`<channelId>_<accountId>_<peerId>`），作为每用户 FIFO 的键。 */
   readonly bindingId: string
@@ -46,12 +45,12 @@ export interface QueuedTask {
 
 /**
  * scheduler 对执行与出队降级路径的全部外部依赖。回调 promise resolve 即该任务完成
- * （含组装层的清理与出站处理）；reject 按 settle 处理并记录，不得阻塞队列。
+ * （含 core/index.ts 的清理与出站处理）；reject 按 settle 处理并记录，不得阻塞队列。
  */
 export interface SchedulerCallbacks {
   /**
    * 正常执行一个任务：准备会话 → followup → 等待 → deliver。占全局槽与该用户 busy，
-   * 直至 promise settle。实现自身的失败应在内部消化后 resolve（终态 envelope 由组装层负责），
+   * 直至 promise settle。实现自身的失败应在内部消化后 resolve（终态 envelope 由 core/index.ts 负责），
    * reject 会被 scheduler 记为 `turn_failed`/`executor_error` 并释放槽。
    */
   execute(task: QueuedTask): Promise<void>
@@ -68,12 +67,12 @@ export interface SchedulerCallbacks {
   dropped(task: QueuedTask, reason: 'expired'): void | Promise<void>
   /**
    * 正常停止时对每个尚未执行的排队任务恰调用一次；不发送 queue-expired 广播（9.3），
-   * 如何记录与关闭 port 由组装层决定。同步回调；抛错只记日志，不中断其余任务的丢弃。
+   * 如何记录与关闭 port 由 core/index.ts 决定。同步回调；抛错只记日志，不中断其余任务的丢弃。
    */
   onStopDropped(task: QueuedTask): void
 }
 
-/** admit 输入；requestId / messageId / text / receivedAt / expiresAt 由组装层规范化后提供。 */
+/** admit 输入；requestId / messageId / text / receivedAt / expiresAt 由 core/index.ts 规范化后提供。 */
 export interface AdmitInput {
   requestId: string
   bindingId: string
@@ -94,7 +93,7 @@ export type AdmitResult =
   | { accepted: false; reason: 'expired' }
   | { accepted: true; task: QueuedTask }
 
-/** 健康探针快照（设计文档 13.2：待处理数量与运行数量；waitingPeers 为附加维度）。 */
+/** 调度计数快照（core 运行快照的 pending/running 来源；waitingPeers 为附加维度）。 */
 export interface SchedulerStats {
   /** 全局尚未出队的任务条数。 */
   readonly pendingTotal: number
@@ -106,7 +105,7 @@ export interface SchedulerStats {
   readonly waitingPeers: number
 }
 
-/** 每用户 FIFO + 全局槽调度器；生命周期由 core/lifecycle 持有。 */
+/** 每用户 FIFO + 全局槽调度器；启停由 core/index.ts 的启动与停止管道驱动。 */
 export interface Scheduler {
   /**
    * 同步准入：在同一调用内原子完成全部容量检查（该用户 pending+1 ≤ maxPendingPerPeer、
@@ -119,7 +118,7 @@ export interface Scheduler {
   stats(): SchedulerStats
   /**
    * 置 stopping 并丢弃尚未执行的内存队列：每个排队任务恰一次 `onStopDropped`，随后
-   * pending 计数归零；运行中任务不受影响（由组装层停止协调器处理），其槽位在执行
+   * pending 计数归零；运行中任务不受影响（由 core/index.ts 接入的停止协调器处理），其槽位在执行
    * promise settle 后自然释放。幂等：重复调用为 no-op。
    */
   stop(): void
@@ -150,9 +149,17 @@ interface PeerState {
   ready: boolean
 }
 
+/** 调度参数：由总装注入，core 不依赖 GatewayConfig；构造后不变。 */
+export interface SchedulerConfig {
+  readonly maxConcurrent: number
+  readonly maxPendingPerPeer: number
+  readonly maxPendingTotal: number
+  readonly maxPendingBytes: number
+}
+
 /** 创建调度器；now 注入墙钟（默认 Date.now），测试用受控时钟驱动窗口判定。 */
 export function createScheduler(options: {
-  config: Pick<GatewayConfig, 'maxConcurrent' | 'maxPendingPerPeer' | 'maxPendingTotal' | 'maxPendingBytes'>
+  config: SchedulerConfig
   limits: typeof GATEWAY_LIMITS
   logger: GatewayLogger
   callbacks: SchedulerCallbacks

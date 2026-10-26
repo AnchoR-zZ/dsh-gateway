@@ -4,26 +4,34 @@
 
 网关运行在专用的 base-backed `gateway` profile 中，与 dsh 同进程。dsh 提供模型、工具、会话、sandbox 与审批能力；网关负责渠道接入、身份到 session 的映射、排队、turn 控制、回复规划与发送。进程托管、自动重启、服务化和自动监控不在本包范围内。
 
+<a id="project-stage"></a>
+
 ## 项目阶段
 
 当前是初版 MVP 实现，范围是 QQ 官方机器人 C2C 纯文本到 dsh agent 的闭环。MVP 之后仍可能对模块边界、渠道抽象、配置字段、状态 schema 和部署方式做较大调整，暂不承诺向后兼容；README 与架构文档描述的是当前实现，不是最终架构。
+
+<a id="doc-navigation"></a>
 
 ## 文档导航
 
 - [架构地图](docs/architecture.md)：运行组合、宿主接入、职责边界、消息流与扩展入口
 - [入站与 QQ 连接](docs/subsystems/inbound.md)：连接生命周期、渠道状态映射、入站过滤与回复窗口
-- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理路由与错误码、CLI、凭证校验
+- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理服务与 HTTP 路由、错误码、CLI、凭证校验
 - [调度与 turn 控制](docs/subsystems/scheduling.md)：准入、排队、执行槽、turn 结果与超时
 - [会话与持久状态](docs/subsystems/session-state.md)：身份键、映射文件、写事务、会话准备与回收
 - [回复规划与投递](docs/subsystems/outbound.md)：切分与预算、提示顺序、投递状态与出站隔离
 - [配置与固定常量](docs/config.md)：配置文件字段、v1 迁移、热生效范围与 `GATEWAY_LIMITS`
-- [健康、状态与日志](docs/observability.md)：探针与管理路由、状态机、日志事件与脱敏
+- [健康、状态与日志](docs/observability.md)：本机 HTTP 监听与探针、管理路由、状态机、日志事件与脱敏
+
+<a id="environment"></a>
 
 ## 环境
 
 Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.11.2`。dsh 是外部宿主，本包不在 `dependencies` 中携带 dsh；插件加载不受 `engines.dsh` 限制，dsh 宿主版本由部署环境自行选择（开发与自动测试基于 0.2.1-rc.2 的服务包类型）。与宿主共享的 cordis 与 dsh 服务包在 `peerDependencies` 声明（dsh 服务包为 `*`，不限宿主版本，由宿主提供），开发基线锁在 `devDependencies`（0.2.1-rc.2），均不打进构建产物。QQ 渠道使用官方 `@tencent-connect/qqbot-nodejs@1.0.5`；机器人须已获 C2C 与 Markdown 发送权限。
 
 `../reference/` 只存放只读参考源码，不参与本项目的安装、构建或测试。
+
+<a id="commands"></a>
 
 ## 命令
 
@@ -35,7 +43,7 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 | `pnpm typecheck` | `tsc --noEmit` | 类型检查通过，不生成 JavaScript |
 | `pnpm lint` | `oxlint src tests scripts tsdown.config.ts vitest.config.ts` | 无未解决的检查错误 |
 | `pnpm test` | `vitest run` | `tests/**/*.test.ts` 全部通过；以命令输出为准 |
-| `pnpm build` | `tsdown` 双入口构建 | 生成 `dist/index.js`、`dist/index.d.ts`、`dist/cli.js` 与 `dist/cli.d.ts` |
+| `pnpm build` | `tsdown` 双入口构建 | 生成 `dist/index.js`、`dist/index.d.ts`、`dist/cli.js` 与 `dist/cli.d.ts`（入口共享的 `protocol-*.js` 分块一并产出） |
 | `pnpm dev` | `tsdown --watch` | 源码变化后重新构建；不启动 dsh |
 
 普通测试使用替身隔离真实 dsh 宿主、QQ 网络和模型，不要求 QQ 或模型凭证，也不需要先构建 `dist/`。测试会绑定回环随机端口并写入系统临时目录；`tests/qq-channel.test.ts` 加载真实 QQ SDK 模块，但不建立连接。真实 QQ WebSocket、token 校验端点、模型认证与回复、dsh profile 加载、固定 `17890` 端口和终端 Ctrl+C 路径不在自动测试覆盖内。
@@ -56,6 +64,8 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 
 `--port <n>`（或 `--port=<n>`）覆盖默认端口 17890；值参数均支持 `--flag=value` 形式。完整契约（错误码、重复 add、漂移拒绝）见 [channel 管理](docs/subsystems/channel-admin.md)。
 
+<a id="local-dev"></a>
+
 ## 本地联调
 
 [`scripts/gateway.mjs`](scripts/gateway.mjs) 是开发期包装器：每次启动前先执行 `pnpm build`，再用固定开发数据根启动 `gateway` profile。它只服务本地联调，不参与发布和部署。
@@ -69,6 +79,8 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 开发数据根固定为 `tmp/local-test`（已被 git 忽略），启动器不提供覆盖方式：`dsh-home/` 作为 `DSH_HOME`，`gateway-workspace/` 作为 `DSH_GATEWAY_WORKSPACE`。启动器固定设置 `DSH_TELEMETRY_DISABLED=1`，`dsh` 直接取自 `PATH`；启动器不通过环境变量或配置文件选择它，命令缺失时由启动过程报错。Windows 上构建和 `dsh` 启动都经 shell 执行；启动器吞掉第一次 Ctrl+C，等待 dsh 自行退出，第二次 Ctrl+C 才直接结束启动器。
 
 启动器不创建 profile，也不检查 `gateway.config.json`；相关缺失由 dsh 与插件报错。
+
+<a id="runtime-config"></a>
 
 ## 运行时配置
 
@@ -117,6 +129,8 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 | `DSH_TELEMETRY_DISABLED` | 部署固定为 `1` | 禁止 dsh 会话遥测外发；bundle 同时禁用遥测插件 |
 
 模型选择由 `<DSH_HOME>/profiles/gateway/cordis.patch.yml` 中的 `agent-default-model` 行决定。网关启动时读取一次 `ctx.agentDefaultModel.currentSelection()`，所有新建和恢复的 agent 共用该选择；不提供按用户选模。启动摘要会记录实际 provider 与 model。超时、回复条数与消息长度属于固定行为契约，不提供配置项绕过；对应常量集中在 [`GATEWAY_LIMITS`](docs/config.md#gateway-limits)。
+
+<a id="deployment"></a>
 
 ## 部署与启动
 
@@ -167,11 +181,13 @@ secrets/.env                       # dsh 变量与可选 workspace 路径，不�
 
 `<workspace>` 不得与 `<DSH_HOME>` 重叠；配置、state 与用户工作目录均固定在 workspace 内。dsh 会话历史仍由 dsh 管理在 `<DSH_HOME>/sessions`，网关不读写 session 文件。
 
+<a id="operations"></a>
+
 ## 运维
 
 ### 停止与重启
 
-正常停止在运行终端按 Ctrl+C 并等待原进程结束；修改非 channel 配置（limits、`debug` 等）或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。channel 实例的添加、启用与凭证变更不需要重启：日志或 `/readyz` 出现 `blocked` 等需要人工介入的状态时，先按 `manual_restart_required` 的 `reason` 修复原因（例如更正凭证），再重跑 `dsh-gateway channel enable qq` 拉起新实例；该命令失败时重启进程仍是兜底路径。触发点、failed 吸收态与处置边界见[健康与日志](docs/observability.md#state-machines)。
+正常停止在运行终端按 Ctrl+C 并等待原进程结束；停止期间在 HTTP 监听关闭前本机探针仍可访问，新的管理写入按 503 `gateway_stopping` 拒绝（已保存的配置保留、等下次启动生效），监听最后关闭（见[健康探针与管理路由](docs/observability.md#readiness)）。修改非 channel 配置（limits、`debug` 等）或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。channel 实例的添加、启用与凭证变更不需要重启：日志或 `/readyz` 出现 `blocked` 等需要人工介入的状态时，先按 `manual_restart_required` 的 `reason` 修复原因（例如更正凭证），再重跑 `dsh-gateway channel enable qq` 拉起新实例；该命令失败时重启进程仍是兜底路径。触发点、failed 吸收态与处置边界见[健康与日志](docs/observability.md#state-machines)。
 
 配置文件在启动后被外部修改时，管理路由拒绝写入（409 `config_modified_externally`），不静默覆盖；处置方式是重启 dsh 或把文件改回后重试。手工编辑配置（含移除实例）后重启 dsh 是合法的冷路径。
 
@@ -192,6 +208,8 @@ Get-Content -LiteralPath '<workspace>/state/bindings.json' -Encoding utf8 -Raw |
 4. 使用相同 `.env`、`DSH_HOME` 与 workspace 重启。目标用户下次发消息时应出现新 session ID，其他用户继续恢复原 ID。
 
 加一是为了保持后续写入的递增语义；字段与校验规则见[映射文件](docs/subsystems/session-state.md#bindings-file)。旧 dsh 会话历史、旧网关日志和该用户工作目录均保留；不删除、改名或手写 session 文件。该操作只清空未来模型上下文，不清除工具生成文件或已经发生的外部副作用，也不补发宕机期间的旧消息。
+
+<a id="security-boundaries"></a>
 
 ## 安全与已知边界
 

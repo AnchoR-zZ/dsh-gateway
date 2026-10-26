@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { GATEWAY_LIMITS } from '../src/contracts.js'
 import type { ChannelIngress, ChannelRegistration, GatewayCore, InboundText } from '../src/contracts.js'
 import type { GatewayLogger } from '../src/logging.js'
-import { NOTICE_TEXTS } from '../src/qq/markdown.js'
-import { createQQChannel } from '../src/qq/index.js'
-import type { QQBotCtorOptions, QQBotLike, QQChannelEventMap } from '../src/qq/index.js'
+import { NOTICE_TEXTS } from '../src/channels/qq/markdown.js'
+import { createQQChannel } from '../src/channels/qq/index.js'
+import type { QQBotCtorOptions, QQBotLike, QQChannelEventMap } from '../src/channels/qq/index.js'
 
 /**
  * QQ 渠道组装测试：替身 bot 工厂 + 替身 core/ingress，全程无真实网络。

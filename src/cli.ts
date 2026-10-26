@@ -3,6 +3,8 @@ import { createInterface } from 'node:readline'
 import { Writable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 
+import { CHANNEL_ADD_PATH, CHANNEL_ENABLE_PATH, DEFAULT_GATEWAY_HTTP_PORT } from './http/protocol.js'
+
 /**
  * `dsh-gateway` CLI：channel 管理子命令的瘦 HTTP 客户端。参数解析 → （缺失时交互输入）→
  * 组装请求打运行中网关进程的本机管理路由 → 按响应输出；不做业务判断、不做离线写配置。
@@ -11,17 +13,11 @@ import { pathToFileURL } from 'node:url'
  * 回显；HTTP 用全局 fetch，不新增依赖。网关未运行（连接被拒等）时报错并提示先启动网关。
  */
 
-/** 管理路由默认端口；与网关健康 server 一致。 */
-export const DEFAULT_GATEWAY_ADMIN_PORT = 17_890
-
 const USAGE = [
   'usage: dsh-gateway channel add qq [--app-id <id>] [--app-secret <secret>] [--force] [--port <n>]',
   '       dsh-gateway channel enable qq [--app-id <id>] [--port <n>]',
   '       value options also accept the --flag=value form (e.g. --app-secret=xxx, --port=17890)',
 ].join('\n')
-
-const CHANNEL_ADD_PATH = '/channels/qq'
-const CHANNEL_ENABLE_PATH = '/channels/qq/enable'
 
 /** 已解析的子命令；`unsupported`/`invalid` 为不发起请求的失败形态。 */
 export type ChannelCommand =
@@ -54,7 +50,7 @@ export function parseChannelCommand(argv: readonly string[]): ChannelCommand {
   let appId: string | undefined
   let appSecret: string | undefined
   let force = false
-  let port = DEFAULT_GATEWAY_ADMIN_PORT
+  let port = DEFAULT_GATEWAY_HTTP_PORT
   const allowed = new Set<string>(verb === 'add' ? ['--app-id', '--app-secret', '--force', '--port'] : ['--app-id', '--port'])
   for (let i = 3; i < argv.length; i += 1) {
     const token = argv[i]!

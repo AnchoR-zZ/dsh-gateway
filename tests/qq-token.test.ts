@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createQQTokenValidator, QQ_TOKEN_URL, QQCredentialCheckError } from '../src/qq/token.js'
+import { createQQTokenValidator, QQ_TOKEN_URL, QQCredentialCheckError } from '../src/channels/qq/token.js'
 
 /**
  * QQ 凭证在线校验测试：注入假 fetch，无真实网络。覆盖有效凭证、平台拒绝（非 200/缺

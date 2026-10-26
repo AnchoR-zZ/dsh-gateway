@@ -1,25 +1,25 @@
 # 健康、状态与日志
 
-本页描述本机健康探针与管理路由的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理路由与 CLI 的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/admin.ts`](../src/admin.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/qq/index.ts`](../src/qq/index.ts)。
+本页描述本机 HTTP 监听的所有权与启停位置、健康探针与管理路由的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理业务与 CLI 的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/http/server.ts`](../src/http/server.ts)、[`src/http/routes.ts`](../src/http/routes.ts)、[`src/management/service.ts`](../src/management/service.ts)、[`src/management/status.ts`](../src/management/status.ts)、[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/channels/qq/index.ts`](../src/channels/qq/index.ts)。
 
 <a id="readiness"></a>
 
 ## 健康探针与管理路由
 
-探针是 core 在进程内启动的 HTTP server，默认绑定 `127.0.0.1:17890`，`GET` 探针只读，另有仅本机、仅 channel 管理的 `POST` 管理路由（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用（例如已有实例在运行）时启动直接失败，不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。
+本机 HTTP 监听由 runtime 组装并拥有（[`src/runtime.ts`](../src/runtime.ts) 创建 [`createHttpServer`](../src/http/server.ts) 与 [`createHttpRoutes`](../src/http/routes.ts)，不属于 core 或管理服务），默认绑定 `127.0.0.1:17890`。`GET` 探针只读，另有仅本机、仅 channel 管理的 `POST` 管理路由（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用（例如已有实例在运行）时启动失败（runtime 记录 `manual_restart_required` 并回滚），不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。
 
 | 请求 | 状态码 | 响应正文 | 条件 |
 |---|---|---|---|
 | `GET /livez` | 200 | `{"status":"ok"}` | 监听存在即返回，不检查 core、store 或渠道状态 |
-| `GET /readyz` | 200 或 503 | 健康快照 JSON | 就绪谓词为真返回 200，为假返回 503 |
+| `GET /readyz` | 200 或 503 | 管理状态投影 JSON | 状态投影的 `ready` 为真返回 200，否则 503 |
 | `POST /channels/qq`、`POST /channels/qq/enable` | 200/400/404/409/422/503/500 | 成功 `{"ok":...}` 或 `{"error":{"code","message"}}` | 仅 `POST` + `application/json`（否则 404/400）；契约见 [管理路由](subsystems/channel-admin.md#admin-routes) |
 | 其他路径或方法 | 404 | `{"error":"not found"}` | 不区分路径是否存在，也不提供其他控制语义 |
 
-查询串在匹配前被去掉，`/livez?probe=1` 与 `/livez` 等价；所有响应都带 `content-type: application/json`。管理请求 body 上限 64 KiB，坏 JSON 与非 JSON 内容类型按 400（`invalid_request`）拒绝，处理器异常按 500（`internal_error`）拒绝并记 `state_warning`。
+查询串在匹配前被去掉，`/livez?probe=1` 与 `/livez` 等价；所有响应都带 `content-type: application/json`。管理请求 body 上限 64 KiB，坏 JSON、读取中断与非 JSON 内容类型按 400（`invalid_request`）拒绝；未命中路径或方法回 404 `{"error":"not found"}`；处理器抛出非管理异常时回 500（`internal_error`）并记一条 `state_warning`（`reason` 以 `admin request failed:` 开头）。
 
-就绪谓词要求三项同时成立：core 状态为 `ready`、映射 store 未进入 failed、健康渠道表中除 `disabled` 与 `not_configured` 外的条目全部为 `online`。因此已启用实例处于 `connecting`/`reconnecting`/`blocked`（含"enabled 但未注册"的 `blocked` 铺底值）时整体 503；`not_configured` 与 `disabled` 条目不影响就绪，零渠道实例（空数组或全部 disabled）时 `/readyz` 返回 200。
+就绪谓词由 [`src/management/status.ts`](../src/management/status.ts) 的 `createStatusProjection` 计算，`/readyz` 与管理服务的 `getStatus()` 使用同一份结果，要求三项同时成立：core 状态为 `ready`、映射 store 未进入 failed、健康渠道表中除 `disabled` 与 `not_configured` 外的条目全部为 `online`。因此已启用实例处于 `connecting`/`reconnecting`/`blocked`（含"enabled 但未注册"的 `blocked` 铺底值）时整体 503；`not_configured` 与 `disabled` 条目不影响就绪，零渠道实例（空数组或全部 disabled）时 `/readyz` 返回 200。
 
-`/readyz` 正文与 core 内部健康快照的字段含义一致，但正文键名为 `channels`，core 内部的 `health()` 使用 `channelStates`：
+`/readyz` 正文由状态投影的 `GatewayStatus` 投影成五个键，`channels` 由实例状态数组压平为按键索引的对象：
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -31,9 +31,9 @@
 
 `channels` 的值集合：已注册实例为 `connecting`、`online`、`reconnecting`、`blocked`（注册表实时状态）；配置派生值为 `disabled`（配置存在且 `enabled: false`、未注册）与 `not_configured`（类型零实例）。正文不含用户标识、`sessionId` 或错误原文；键中的 `AppID` 是实例标识，属正文合法内容。
 
-监听在 `core.start()` 的第一步绑定，先于映射加载与 `ready` 迁移：`starting` 期间 `/livez` 已返回 200，`/readyz` 返回 503 且 `coreState` 为 `starting`、`startedAt` 为空字符串。绑定失败时 `start()` 直接拒绝，此时 core 仍在 `starting`，插件入口记 `manual_restart_required` 并执行停止链；映射加载失败时先关闭已绑定的监听再把错误上抛。
+监听在 runtime 启动链的第一步绑定，先于 core 启动：core 处于 `starting` 期间 `/livez` 已返回 200，`/readyz` 返回 503 且 `coreState` 为 `starting`、`startedAt` 为空字符串。绑定失败时 `http.start()` 拒绝、core 不启动，runtime 记录 `manual_restart_required`（`gateway startup failed: ...`）并回滚已创建资源；core 启动失败（如状态映射加载失败）时 core 状态保持 `starting` 且不自行清理资源，同样由 runtime 记录 `manual_restart_required` 后回滚（停止 core 与渠道实例、关闭 HTTP）。
 
-停止链在关闭监听这一步强制断开保持连接，避免探测客户端的 keep-alive 池拖住关闭；关闭后对该端口的连接被拒绝，而不是返回 503。监听未关闭前 `/livez` 恒返回 200，包括 `failed` 与 `stopping` 期间。监听建立后的 `error` 事件记一条 `state_warning`（`reason` 以 `health server error:` 开头），不改变任何状态。
+停止链先关闭管理写入入口与新的实例启动，HTTP 监听最后关闭：停止期间 `/livez` 仍返回 200，管理写请求以 `gateway_stopping` 被拒（HTTP 503），已保存的配置保留但不启动实例；runtime 在总预算内并行等待启动任务收敛（若启动尚未完成）、管理在途操作落定、core 停止与全部实例停止，然后才关闭监听，因此 disposer 返回后不会再出现迟到监听。监听关闭时强制断开保持连接，避免探测客户端的 keep-alive 池拖住关闭，关闭后对该端口的连接被拒绝而不是返回 503。关闭失败只记 `state_warning`。监听创建后挂接的 `error` 事件（含启动期绑定失败）记一条 `state_warning`（`reason` 以 `http server error:` 开头），不改变任何状态。
 
 <a id="state-machines"></a>
 
@@ -51,7 +51,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 迁移到当前状态是静默 no-op，不写日志；表外迁移被拒绝并记 `state_warning`，`reason` 形如 `rejected core state transition starting -> stopped`，状态保持不变。迁移函数返回本次调用是否真的改变了状态，拥有者据此执行一次性副作用。
 
-`core.start()` 要求当前为 `starting`，否则直接抛错；成功路径依次为绑定监听、加载映射、启动会话回收器、迁移 `ready` 并记录 `startedAt`。正常停止把 `starting` 或 `ready` 迁到 `stopping`，清理完成后仅当状态仍为 `stopping` 才迁到 `stopped`；已经 `failed` 时停止清理照常执行但不改写状态，使 `/readyz` 持续暴露 `failed`。入站准入要求 core 为 `ready`：其他状态一律拒绝；`failed` 不自动恢复，需要结束旧进程、修复原因后按 [README](../README.md) 的步骤重启。
+`core.start()` 要求当前为 `starting`，否则直接抛错；成功路径依次为加载持久映射、启动会话回收器、迁移 `ready` 并记录 `startedAt`，不绑定或关闭任何监听。启动失败直接拒绝且不自行清理资源，由 runtime 记录 `manual_restart_required` 并回滚。正常停止把 `starting` 或 `ready` 迁到 `stopping`，清理完成后仅当状态仍为 `stopping` 才迁到 `stopped`；已经 `failed` 时停止清理照常执行但不改写状态，使 `/readyz` 持续暴露 `failed`。入站准入要求 core 为 `ready`：其他状态一律拒绝；`failed` 不自动恢复，需要结束旧进程、修复原因后按 [README](../README.md) 的步骤重启。
 
 渠道状态集合为 `connecting`、`online`、`reconnecting`、`blocked`。注册渠道时初始为 `connecting`，此后由渠道适配器通过注册返回的 `setState` 写入；core 不校验渠道状态之间的迁移顺序，只丢弃已注销代次或已移出注册表的写入。只有 `online` 计入就绪：`reconnecting` 记 `channel_reconnecting`，`blocked` 记 `manual_restart_required` 并让 `/readyz` 返回 503。SDK 事件到这四个状态的映射见 [QQ 连接与生命周期](subsystems/inbound.md#qq-connection)；`disabled`/`not_configured` 是健康表的配置派生值，不进入注册表。
 
@@ -63,12 +63,12 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 |---|---|
 | QQ 认证失败、终局断连（`willReconnect` 为假）或 SDK 启动失败 | QQ 适配器，随后把渠道置 `blocked` |
 | QQ 出站隔离（单次发送超过 `QQ_OUTBOUND_CALL_TIMEOUT_MS` 未结束） | QQ 适配器，随后把渠道置 `blocked` |
-| 渠道注册失败（含管理路由拉起实例失败） | QQ 适配器 / 实例管理器 |
+| 渠道注册失败（含管理命令拉起实例失败） | QQ 适配器 / 实例管理器 |
 | 渠道进入 `blocked` | core |
 | 映射持久化失败（store 转 failed），或 core 因持久状态不可用、释放未收敛进入 `failed` | core |
 | LRU 逐出或陈旧 handle 的释放未收敛，以及 `releaseHandle` 返回后 session 仍在 live registry（条目转 stuck） | 会话管理器 |
 | 停机预算内未完成的步骤 | 停止协调器 |
-| 插件异步启动失败，或 core 与渠道实例的停止在有界等待内未同时收敛 | 插件入口 |
+| runtime 异步启动失败，或停机总预算内启动任务、管理在途操作、core 停止与实例停止未全部收敛 | runtime |
 
 同一次渠道故障通常产生两行：QQ 侧带具体 `reason` 的归因行，以及 core 对 `blocked` 的记录行；字段互补，不要按行数统计故障数。
 
@@ -84,11 +84,11 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 | 事件 | 触发点 | 常见字段 |
 |---|---|---|
-| `startup_summary` | 插件加载时、core 创建之前记录一次启动摘要 | `version`、`schemaVersion`、`configSchemaVersion`、`provider`、`model`、`policy`、`maxConcurrent`、`maxLiveAgents` |
+| `startup_summary` | runtime 组装时、core 创建之前记录一次启动摘要 | `version`、`schemaVersion`、`configSchemaVersion`、`provider`、`model`、`policy`、`maxConcurrent`、`maxLiveAgents` |
 | `config_template_created` | 首次启动创建了 v2 配置模板（零实例） | `reason`（含模板路径与 `dsh-gateway channel add qq` 指引） |
 | `config_migrated` | 配置文件由 v1 自动迁移为 v2 并写回 | `reason`（含文件路径） |
-| `channel_added` | 管理路由成功添加/更新一个 QQ 实例 | `channelId`、`appId`、`outcome`（响应时状态） |
-| `channel_enabled` | 管理路由启用（或幂等确认）一个 QQ 实例 | `channelId`、`appId`、`outcome` |
+| `channel_added` | 管理服务成功添加/更新一个 QQ 实例 | `channelId`、`appId`、`outcome`（响应时状态） |
+| `channel_enabled` | 管理服务启用（或幂等确认）一个 QQ 实例 | `channelId`、`appId`、`outcome` |
 | `queued` | core 准入接受入站并同步入队 | `requestId`、`channelId`、`bindingId`、`messageId`、`inputLength` |
 | `inbound_ignored` | 入站被过滤或忽略：渠道过滤失败、core 形态校验或身份键失败、出队前已过期、停机丢弃队列、出站隔离期间、入站处理器异常 | 渠道侧 `messageId`、`reason`、`outcome`、`attachmentCount`、`inputLength`；core 侧 `reason`，出队或丢队列路径另带 `requestId`、`bindingId`、`messageId`，形态校验路径带 `channelId`、`generation` |
 | `inbound_rejected` | 准入拒绝（core 非 `ready`、代次失效、store failed、容量超限、入队时已过期），或拒绝提示未发出（回复窗口已过、独立发送槽已满） | core 侧 `channelId`、`generation`、`reason`，`admit` 拒绝附 `requestId`、`bindingId`、`messageId`；渠道侧 `messageId`、`reason`，提示未发出时另带 `outcome` |
@@ -102,10 +102,10 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `reply_sent`、`reply_partial`、`reply_unknown` | 投递报告分别为 `sent`、`partial`、`unknown` | 渠道投递报告 `messageId`、`deliveryMs`、`attempted`、`confirmed`；提示信封 `requestId`、`bindingId`、`messageId`、`attempted`、`confirmed`；turn 回复 `requestId`、`sessionId`、`turn`、`outputLength` |
 | `reply_failed` | 报告为 `failed`、`expired` 或 `closed`，`deliver` 抛错，回复规划降级，或拒绝提示发送失败 | `reason` 加路径相关字段：报告路径带 `messageId`，或 `requestId`、`sessionId`、`turn`，个别带 `bindingId`、`attempted`、`confirmed`；规划降级与提示发送失败只带 `messageId` |
 | `state_failed` | 映射 store 转 failed、core 进入 failed，或渠道 `setState` 抛错 | `error`（store）、`reason`（core 转 failed），或 `channelId`、`reason`（渠道） |
-| `state_warning` | 非致命告警：非法状态迁移、探针运行期错误、停机步骤抛错、目录 `fsync` 失败、逐出 handle 已释放但 session 仍 live、`stop` 抛错（含启动失败后 core 与 QQ 停止失败）、释放或取消清理时 flush 报无持久化监听者 | `reason`，部分带 `channelId`、`bindingId`、`sessionId`、`requestId`、`turn` |
+| `state_warning` | 非致命告警：非法状态迁移、HTTP 监听 `error` 事件（含启动期绑定失败与运行期错误）、管理请求处理器异常（`admin request failed:`）、停机步骤抛错、目录 `fsync` 失败、逐出 handle 已释放但 session 仍 live、`stop` 抛错（含启动失败后 core、实例与 HTTP 的清理失败）、释放或取消清理时 flush 报无持久化监听者 | `reason`，部分带 `channelId`、`bindingId`、`sessionId`、`requestId`、`turn` |
 | `channel_reconnecting` | 渠道进入 `reconnecting` | `channelId`、`generation`；QQ 侧归因行另带 `reason` |
 | `manual_restart_required` | 需要人工介入，触发点见[状态机](#state-machines) | `reason`；部分带 `channelId`、`generation`，或 `bindingId`、`sessionId` |
-| `shutdown` | 停止协调器结束，或 QQ SDK 的 `start()` 在未停止渠道的情况下 resolve | 正常结束只有 `event` 与 `time`；预算耗尽时 `reason` 为 `budget_exhausted`；QQ 场景带 `channelId` 与 `reason` |
+| `shutdown` | core 停止协调器结束，或 QQ SDK 的 `start()` 在未停止渠道的情况下 resolve | 正常结束只有 `event` 与 `time`；预算耗尽时 `reason` 为 `budget_exhausted`；QQ 场景带 `channelId` 与 `reason` |
 
 渠道进入 `reconnecting` 或 `blocked` 时，渠道侧与 core 侧会各记一行：QQ 先记带原因的 `channel_reconnecting` 或 `manual_restart_required`，core 随后记状态行；释放未收敛等路径也可能由会话管理器与 core 各记一条 `manual_restart_required`。字段互补，按 `channelId`、`bindingId` 与时间聚合，不要按行数统计故障数。
 

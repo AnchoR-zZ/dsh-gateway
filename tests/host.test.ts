@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { AgentHandleLike } from '../src/core/session-manager.js'
 import type { TurnSessionEvent } from '../src/core/turn-runner.js'
-import { createAgentHost, translateSessionEvent } from '../src/index.js'
+import { createAgentHost, translateSessionEvent } from '../src/host/dsh.js'
 
 /**
  * 宿主接入层测试（T10）：translateSessionEvent 纯函数（真实 dsh 类型形状的字面量）、

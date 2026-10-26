@@ -1,4 +1,4 @@
-import { redact } from '../logging.js'
+import { redact } from '../../logging.js'
 
 /**
  * QQ 凭证在线校验：一次 `POST https://bots.qq.com/app/getAppAccessToken`（body 为

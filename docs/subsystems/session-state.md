@@ -1,6 +1,6 @@
 # 会话与持久状态
 
-本页描述网关如何把聊天身份绑定到 dsh 会话：身份键、`bindings.json` 映射、串行写事务、会话准备与 handle 缓存回收；配置字段与 workspace 解析见 [配置与固定常量](../config.md#config-fields)，调度与 turn 控制见 [调度](scheduling.md#scheduler)，持久状态失败后的就绪与状态机见 [健康、状态与日志](../observability.md#state-machines)。源码：[`src/core/state-store.ts`](../../src/core/state-store.ts)、[`src/core/session-manager.ts`](../../src/core/session-manager.ts)、[`src/index.ts`](../../src/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
+本页描述网关如何把聊天身份绑定到 dsh 会话：身份键、`bindings.json` 映射、串行写事务、会话准备与 handle 缓存回收；配置字段与 workspace 解析见 [配置与固定常量](../config.md#config-fields)，调度与 turn 控制见 [调度](scheduling.md#scheduler)，持久状态失败后的就绪与状态机见 [健康、状态与日志](../observability.md#state-machines)。源码：[`src/core/state-store.ts`](../../src/core/state-store.ts)、[`src/core/session-manager.ts`](../../src/core/session-manager.ts)、[`src/host/dsh.ts`](../../src/host/dsh.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
 
 <a id="binding-id"></a>
 
@@ -46,7 +46,7 @@
 
 主文件与 `.bak` 都使用 2 空格缩进的 UTF-8 JSON。手工编辑必须满足上表全部规则，否则启动被拒绝；`.bak` 保存上一份已提交快照，但加载只读主文件，主文件损坏时不会回退到 `.bak`。
 
-加载发生在 core 进入 ready 之前：`state/` 或主文件不存在（`ENOENT`）时得到空快照、`revision=0`，不立即写文件，首个写事务才创建目录与主文件；文件存在时逐项校验 JSON、schema、revision、键与每条记录。任一失败都会抛 `StateStoreError`，`core.start()` 关闭健康监听并抛错，启动链记录 `manual_restart_required` 后停止已创建资源。坏记录不会被跳过，也不存在以空状态重建或自动迁移 schema 的路径。加载成功后再次 `load()` 是 no-op，不重置已提交快照；加载失败只拒绝本次启动，不把 store 置为 `failed`，`failed` 仅由写事务的持久化失败或超时触发。
+加载发生在 core 进入 ready 之前：`state/` 或主文件不存在（`ENOENT`）时得到空快照、`revision=0`，不立即写文件，首个写事务才创建目录与主文件；文件存在时逐项校验 JSON、schema、revision、键与每条记录。任一失败都会抛 `StateStoreError`，`core.start()` 拒绝且状态保持 `starting`、不自行清理资源，runtime 记录 `manual_restart_required` 后回滚（停止 core 与实例、关闭 HTTP）。坏记录不会被跳过，也不存在以空状态重建或自动迁移 schema 的路径。加载成功后再次 `load()` 是 no-op，不重置已提交快照；加载失败只拒绝本次启动，不把 store 置为 `failed`，`failed` 仅由写事务的持久化失败或超时触发。
 
 <a id="write-transaction"></a>
 

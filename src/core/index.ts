@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
 
-import type { GatewayConfig, QQChannelInstance } from '../config.js'
 import { computeBindingId, isValidBindingScope } from '../contracts.js'
 import type {
   ChannelIdentity,
@@ -14,15 +13,22 @@ import type {
   ReplyEnvelope,
 } from '../contracts.js'
 import type { GatewayLogger } from '../logging.js'
+import type {
+  ChannelRuntimeSnapshot,
+  ChannelState,
+  CoreHandle,
+  CoreQueries,
+  CoreSnapshot,
+} from './contracts.js'
+import { createCoreStateMachine, createStopCoordinator } from './lifecycle.js'
+import type { StopStepContext } from './lifecycle.js'
 import type { QueuedTask, Scheduler, SchedulerCallbacks } from './scheduler.js'
 import type { AgentHandleLike, SessionManager } from './session-manager.js'
 import type { StateStore } from './state-store.js'
 import type { TurnRunner } from './turn-runner.js'
-import { createCoreStateMachine, createHealthServer, createStopCoordinator } from './lifecycle.js'
-import type { AdminHandler, ChannelHealthState, ChannelState, CoreState, StopStepContext } from './lifecycle.js'
 
 /**
- * core/index：GatewayCore 总装（设计 2 节、4.2、6.1、6.2、8.1、9.1、9.3、12 表、13 节）。
+ * core/index：core 组装与消息执行管道（设计 2 节、4.2、6.1、6.2、8.1、9.1、9.3、12 表）。
  *
  * 把 scheduler（真实实例经工厂注入）、session-manager、turn-runner、state-store 与 reply
  * port 连成闭环：registerChannel 维护渠道注册表与代次，inbound 做防御性校验后同步原子
@@ -30,26 +36,43 @@ import type { AdminHandler, ChannelHealthState, ChannelState, CoreState, StopSte
  * runner（观察器先于 followup 在 runner 内完成）→ deliver"管道，10 分钟截止从获得全局槽
  * 起算并覆盖 prepare；enterFailed 是 12 表"停止准入"各行的汇集点；stop 委托 lifecycle 的
  * 幂等停止协调器。多实例并存：单实例 disconnect 只注销该实例、丢弃其排队任务并中断其
- * 运行中的执行，scheduler 与其他实例继续。本模块不导入 QQ SDK 与 dsh 运行时包（设计 2 节
- * 边界）；事件源适配（eventsFor）由插件入口在构造 runner 时直接注入，core 不持有事件订阅。
+ * 运行中的执行，scheduler 与其他实例继续。
+ *
+ * 边界：core 专注消息执行，不拥有 HTTP 监听/探针/管理路由（由 runtime 组装的 http 模块
+ * 负责）、不聚合配置派生状态（`disabled`/`not_configured` 与 ready 判定在 management 查询
+ * 层）、不依赖 `GatewayConfig`（调度/会话等参数由总装注入）。对外只暴露 `CoreHandle` 的
+ * 三个能力面：`ingress`（渠道注册面）、`query.snapshot()`（运行快照）、
+ * `lifecycle.start/stop`（启停）。本模块不导入 QQ SDK 与 dsh 运行时包（设计 2 节边界）；
+ * 事件源适配（eventsFor）由 host/dsh.ts 提供、runtime.ts 在构造 runner 时直接注入，
+ * core 不持有事件订阅。
  */
 
-export type { ChannelHealthState, ChannelState, CoreState } from './lifecycle.js'
-export type { AdminHandler } from './lifecycle.js'
+/** 渠道注册面、运行快照与生命周期能力面的对外类型（单一出处 core/contracts.ts）。 */
+export type {
+  ChannelRuntimeSnapshot,
+  ChannelState,
+  CoreHandle,
+  CoreLifecycle,
+  CoreQueries,
+  CoreSnapshot,
+  CoreState,
+} from './contracts.js'
 
 /** limits 注入形状：键集合与 GATEWAY_LIMITS 一致，值放宽为 number 以便测试注入小预算。 */
 export type CoreLimits = { readonly [K in keyof typeof GATEWAY_LIMITS]: number }
 
+/**
+ * core 组装选项：只含执行管道所需依赖与注入接缝；配置（调度/会话参数）由总装决定后经
+ * 工厂/实例传入，core 不读 GatewayConfig。
+ */
 export interface GatewayCoreOptions {
-  config: GatewayConfig
   limits: CoreLimits
   logger: GatewayLogger
   store: StateStore
   /**
    * scheduler 工厂：core 在构造时把自己的执行管道接成 SchedulerCallbacks 传入。
-   * 简报原文为 `scheduler: Scheduler`，但 scheduler 的回调只能在 createScheduler 构造时
-   * 接线，外部预构造的实例永远无法回调 core 的管道——这是简报承认的缝隙（"scheduler 已
-   * 在构造时接好 callbacks"），故收工厂而非实例；T10 与测试传 createScheduler 的单参包装。
+   * scheduler 的回调只能在 createScheduler 构造时接线，外部预构造的实例永远无法回调
+   * core 的管道，故收工厂而非实例；runtime.ts 把调度参数（并发/排队上限）绑进工厂。
    */
   createScheduler: (callbacks: SchedulerCallbacks) => Scheduler
   sessions: SessionManager
@@ -59,44 +82,6 @@ export interface GatewayCoreOptions {
   /** 单调时钟（turn 截止、清理预算）；默认 Math.round(performance.now())，与 runner 同口径。 */
   mono?: () => number
   requestId?: () => string
-  /** 健康监听注入（默认 127.0.0.1:17890）；测试用 host/port=0 探测随机端口。 */
-  health?: { host?: string; port?: number }
-  /**
-   * 当前配置的 QQ 实例清单（健康展示的 `disabled`/`not_configured` 来源）；缺省固定取
-   * `config.qqInstances` 的启动快照。channel 管理面热更新配置后经此回调反映最新清单。
-   */
-  currentQQInstances?: () => readonly QQChannelInstance[]
-}
-
-/**
- * 健康快照（/readyz 正文与探针判定共用）；channelStates 键为 `<channelId>:<appId>`，
- * 值含配置派生的 `disabled`/`not_configured`。
- */
-export interface CoreHealth {
-  coreState: CoreState
-  channelStates: Record<string, ChannelHealthState>
-  pending: number
-  running: number
-  startedAt: string
-}
-
-export interface CoreHandle {
-  /** 给渠道适配器（T10）的注册面。 */
-  core: GatewayCore
-  /**
-   * 注册本机 channel 管理路由处理器（见 lifecycle 的 AdminHandler）；应在 start() 之前
-   * 调用，传 undefined 撤销注册。
-   */
-  setAdminHandler(handler: AdminHandler | undefined): void
-  /**
-   * 启动（13.1）：绑定健康监听（占用失败抛错，不杀别的进程）→ store.load()（校验失败
-   * 抛错，由 T10 决定进程退出）→ sessions.start()（回收器）→ coreState=ready。
-   * 任一步失败时关闭已创建资源，coreState 保持 starting。
-   */
-  start(): Promise<void>
-  /** 幂等停止协调器（9.3），总预算 CORE_SHUTDOWN_BUDGET_MS；并发调用共享同一 promise。 */
-  stop(): Promise<void>
-  health(): CoreHealth
 }
 
 export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
@@ -104,9 +89,6 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
   const now: () => number = options.now ?? Date.now
   const mono: () => number = options.mono ?? (() => Math.round(performance.now()))
   const nextRequestId: () => string = options.requestId ?? randomUUID
-  const currentQQInstances: () => readonly QQChannelInstance[] =
-    options.currentQQInstances ?? (() => options.config.qqInstances)
-  let adminHandler: AdminHandler | undefined
 
   const stateMachine = createCoreStateMachine({ logger })
   let startedAt = ''
@@ -120,31 +102,6 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
   const channelKey = (channelId: string, accountId: string): string =>
     JSON.stringify([channelId, accountId])
   const channels = new Map<string, ChannelEntry>()
-
-  /**
-   * 健康渠道表：配置实例先行铺底（enabled 未注册 → blocked、disabled 未注册 → disabled），
-   * 已注册实例覆盖为其运行状态；qq 类型零实例（配置与注册表皆空）时保留 `not_configured`。
-   */
-  function mergedChannelStates(): Record<string, ChannelHealthState> {
-    const states: Record<string, ChannelHealthState> = {}
-    let qqConfigured = false
-    for (const instance of currentQQInstances()) {
-      states[`qq:${instance.appId}`] = instance.enabled ? 'blocked' : 'disabled'
-      qqConfigured = true
-    }
-    let qqRegistered = false
-    for (const entry of channels.values()) {
-      const { channelId, accountId } = entry.channel
-      states[`${channelId}:${accountId}`] = entry.state
-      if (channelId === 'qq') {
-        qqRegistered = true
-      }
-    }
-    if (!qqConfigured && !qqRegistered) {
-      states.qq = 'not_configured'
-    }
-    return states
-  }
 
   // ---- requestId → 执行期元数据。QueuedTask 不携带 identity 与 maxMessages（scheduler
   // 在 admit 时只收 AdmitInput 白名单字段），core 在 admit 前注册、各回调完成时删除。
@@ -411,43 +368,13 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
   }
   const scheduler = options.createScheduler(schedulerCallbacks)
 
-  // ---- 健康探针（13.2）。ready 判定不含 `disabled`/`not_configured` 条目：已启用实例
-  // 无论注册表状态（connecting/blocked/reconnecting）还是"enabled 但未注册"的 blocked
-  // 铺底值，都使整体 ready 为假。
-  function allChannelsHealthy(): boolean {
-    for (const state of Object.values(mergedChannelStates())) {
-      if (state !== 'online' && state !== 'disabled' && state !== 'not_configured') {
-        return false
-      }
-    }
-    return true
-  }
-
-  const healthServer = createHealthServer({
-    host: options.health?.host,
-    port: options.health?.port,
-    logger,
-    admin: (path, body) => (adminHandler === undefined ? Promise.resolve(undefined) : adminHandler(path, body)),
-    snapshot: () => {
-      const stats = scheduler.stats()
-      return {
-        coreState: stateMachine.get(),
-        channels: mergedChannelStates(),
-        pending: stats.pendingTotal,
-        running: stats.running,
-        startedAt,
-      }
-    },
-    ready: () => stateMachine.get() === 'ready' && !store.isFailed() && allChannelsHealthy(),
-  })
-
-  // ---- 停止协调器（9.3）接线。
+  // ---- 停止协调器（9.3）接线：不再包含 HTTP/健康监听关闭（传输层由 runtime 负责）。
   const coordinator = createStopCoordinator({
     limits,
     mono,
     logger,
     onStopping: () => {
-      // failed 吸收态下停止清理照常进行，但不改写状态（保持 failed 对 /readyz 可见）。
+      // failed 吸收态下停止清理照常进行，但不改写状态（保持 failed 对就绪查询可见）。
       const current = stateMachine.get()
       if (current === 'starting' || current === 'ready') {
         stateMachine.transition('stopping')
@@ -493,9 +420,6 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     },
     flushStore: async () => {
       await store.flushNow()
-    },
-    closeHealth: async () => {
-      await healthServer.close()
     },
     onStopped: () => {
       // 仅正常路径落 stopped；failed 吸收态保持 failed（manual_restart_required 语义）。
@@ -562,7 +486,7 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     ingressGeneration: number,
     message: InboundText,
   ): Promise<InboundResult> {
-    // 顺序按简报：core 状态 → 代次 → store → 防御校验 → 原子准入；全部同步判定后立即返回。
+    // 顺序固定：core 状态 → 代次 → store → 防御校验 → 原子准入；全部同步判定后立即返回。
     const coreState = stateMachine.get()
     if (coreState !== 'ready') {
       const reason = coreState === 'failed' ? 'unavailable' : 'stopping'
@@ -685,8 +609,8 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     }
   }
 
-  // ---- GatewayCore 注册面（4.2）。
-  const core: GatewayCore = {
+  // ---- GatewayCore 注册面（4.2）：对内称 ingress，对外经 CoreHandle.ingress 暴露。
+  const ingress: GatewayCore = {
     registerChannel(channel: ChannelRegistration): ChannelIngress {
       const coreState = stateMachine.get()
       if (coreState !== 'starting' && coreState !== 'ready') {
@@ -741,43 +665,60 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
     },
   }
 
-  // ---- 启动（13.1）：绑定监听 → 加载映射 → 启回收器 → ready。
+  // ---- 运行快照（只读）；配置派生状态与 ready 判定在 management 查询层。
+  const query: CoreQueries = {
+    snapshot(): CoreSnapshot {
+      const stats = scheduler.stats()
+      return {
+        state: stateMachine.get(),
+        stateStoreFailed: store.isFailed(),
+        startedAt,
+        pending: stats.pendingTotal,
+        running: stats.running,
+        channels: [...channels.values()].map(
+          (entry): ChannelRuntimeSnapshot => ({
+            channelId: entry.channel.channelId,
+            accountId: entry.channel.accountId,
+            state: entry.state,
+          }),
+        ),
+      }
+    },
+  }
+
+  /**
+   * 启动（13.1）：加载持久映射 → 启动回收器 → ready + startedAt。映射加载失败直接抛错
+   * （state 保持 starting，不在这里关闭任何资源——HTTP 监听等由 runtime 自行回滚）。
+   *
+   * 并发停止：`store.load()` 挂起期间 runtime 可能已触发停止链。此时启动被停止吸收——
+   * 不启动会话回收器、不写 startedAt、不抛错；只有状态机接受 `ready` 迁移后才产生启动
+   * 副作用，避免"停止后重启回收器"或"stopped 状态却带 startedAt"。
+   */
   async function start(): Promise<void> {
     if (stateMachine.get() !== 'starting') {
       throw new Error(`core start requires state starting, got ${stateMachine.get()}`)
     }
-    // 绑定失败（EADDRINUSE 等）抛错拒绝启动；已创建资源只有 server 自身，无需回滚。
-    await healthServer.start()
-    try {
-      await store.load()
-    } catch (err) {
-      await healthServer.close()
-      throw err
+    await store.load()
+    if (stateMachine.get() !== 'starting') {
+      return
     }
+    // 先启动回收器、再迁移 ready：两步之间没有 await，停止链无法插入；回收器启动抛错时
+    // core 尚未 ready，启动失败不会留下"ready 但 start reject"的半状态。
     sessions.start()
-    stateMachine.transition('ready')
+    if (!stateMachine.transition('ready')) {
+      return
+    }
     startedAt = new Date(now()).toISOString()
   }
 
-  function health(): CoreHealth {
-    const stats = scheduler.stats()
-    return {
-      coreState: stateMachine.get(),
-      channelStates: mergedChannelStates(),
-      pending: stats.pendingTotal,
-      running: stats.running,
-      startedAt,
-    }
-  }
-
   return {
-    core,
-    setAdminHandler: (handler: AdminHandler | undefined) => {
-      adminHandler = handler
+    ingress,
+    query,
+    lifecycle: {
+      start,
+      /** 幂等停止协调器（9.3），总预算 CORE_SHUTDOWN_BUDGET_MS；并发调用共享同一 promise。 */
+      stop: () => coordinator.stop(),
     },
-    start,
-    stop: () => coordinator.stop(),
-    health,
   }
 }
 
