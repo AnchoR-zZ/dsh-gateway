@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=none
 # dsh-gateway bundle patch: 叠加在 @deepseek-ai/dsh-base 之上（后层覆盖，逐行 last-write-wins）。
 # 一个 patch 条目对目标行的 `config` 是整值替换，覆盖时必须重述该行完整 config。
 # 行 id 与 @deepseek-ai/dsh-base 的 cordis.patch.yml 实际行 id 一致；行顺序不承载加载语义。
