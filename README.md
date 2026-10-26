@@ -14,9 +14,9 @@
 
 ## 文档导航
 
-- [架构地图](docs/architecture.md)：运行组合、宿主接入、职责边界、消息流与扩展入口
+- [架构地图](docs/architecture.md)：运行组合、宿主接入、职责边界、消息流、扫码绑定流程与扩展入口
 - [入站与 QQ 连接](docs/subsystems/inbound.md)：连接生命周期、渠道状态映射、入站过滤与回复窗口
-- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理服务与 HTTP 路由、错误码、凭证校验
+- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理服务与 HTTP 路由、扫码绑定、错误码、凭证校验
 - [调度与 turn 控制](docs/subsystems/scheduling.md)：准入、排队、执行槽、turn 结果与超时
 - [会话与持久状态](docs/subsystems/session-state.md)：身份键、映射文件、写事务、会话准备与回收
 - [回复规划与投递](docs/subsystems/outbound.md)：切分与预算、提示顺序、投递状态与出站隔离
@@ -27,7 +27,7 @@
 
 ## 环境
 
-Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.11.2`。dsh 是外部宿主，本包不在 `dependencies` 中携带 dsh；插件加载不受 `engines.dsh` 限制，dsh 宿主版本由部署环境自行选择（开发与自动测试基于 0.2.1-rc.2 的服务包类型）。与宿主共享的 cordis 与 dsh 服务包在 `peerDependencies` 声明（dsh 服务包为 `*`，不限宿主版本，由宿主提供），开发基线锁在 `devDependencies`（0.2.1-rc.2），均不打进构建产物。QQ 渠道使用官方 `@tencent-connect/qqbot-nodejs@1.0.5`；机器人须已获 C2C 与 Markdown 发送权限。
+Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.11.2`。dsh 是外部宿主，本包不在 `dependencies` 中携带 dsh；插件加载不受 `engines.dsh` 限制，dsh 宿主版本由部署环境自行选择（开发与自动测试基于 0.2.1-rc.2 的服务包类型）。与宿主共享的 cordis 与 dsh 服务包在 `peerDependencies` 声明（dsh 服务包为 `*`，不限宿主版本，由宿主提供），开发基线锁在 `devDependencies`（0.2.1-rc.2），均不打进构建产物。QQ 渠道使用官方 `@tencent-connect/qqbot-nodejs@1.0.5`；QQ 扫码绑定使用官方运行时依赖 `@tencent-connect/qqbot-connector@1.2.0`，二维码协议（创建绑定任务、轮询、凭据解密）在该依赖内；机器人须已获 C2C 与 Markdown 发送权限。
 
 `../reference/` 只存放只读参考源码，不参与本项目的安装、构建或测试。
 
@@ -46,7 +46,7 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 | `pnpm build` | `tsdown` 构建插件入口 | 生成 `dist/index.js` 与 `dist/index.d.ts` |
 | `pnpm dev` | `tsdown --watch` | 源码变化后重新构建；不启动 dsh |
 
-普通测试使用替身隔离真实 dsh 宿主、QQ 网络和模型，不要求 QQ 或模型凭证，也不需要先构建 `dist/`。测试会绑定回环随机端口并写入系统临时目录；`tests/qq-channel.test.ts` 加载真实 QQ SDK 模块，但不建立连接。真实 QQ WebSocket、token 校验端点、模型认证与回复、dsh profile 加载、固定 `17890` 端口和终端 Ctrl+C 路径不在自动测试覆盖内。
+普通测试使用替身隔离真实 dsh 宿主、QQ 网络、模型与腾讯扫码绑定端点（扫码协议用可注入的假连接器），不要求 QQ 或模型凭证，也不需要先构建 `dist/`。测试会绑定回环随机端口并写入系统临时目录；`tests/qq-channel.test.ts` 加载真实 QQ SDK 模块，但不建立连接。真实 QQ WebSocket、token 校验端点、腾讯扫码绑定端点与二维码流程、模型认证与回复、dsh profile 加载、固定 `17890` 端口和终端 Ctrl+C 路径不在自动测试覆盖内。
 
 提交或联调前依次完成 typecheck、lint、test 和 build，任一步失败先修复再继续。
 
@@ -54,12 +54,14 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 
 ## channel 管理路由
 
-网关进程内自带两条仅本机、无鉴权的 POST 管理路由（默认 `http://127.0.0.1:17890`），用于在网关运行时添加与启用 QQ 机器人实例，不需要重启进程；网关未运行时只能修改配置文件后重启。
+网关进程内自带仅本机、无鉴权的 channel 管理路由（默认 `http://127.0.0.1:17890`），用于在网关运行时添加、启用或扫码绑定 QQ 机器人实例，不需要重启进程；网关未运行时只能修改配置文件后重启。
 
 | 路由 | 请求 body | 作用 |
 |---|---|---|
 | `POST /channels/qq` | `{"appId","appSecret","force"?}` | 添加/更新实例：在线校验凭证（`force: true` 跳过）、保存配置并启动实例 |
 | `POST /channels/qq/enable` | `{"appId"?}` | 置 `enabled: true` 并拉起未在线实例（`manual_restart_required` 的重试入口）；省略 `appId` 时仅当配置中恰好一个实例合法 |
+| `POST /channels/qq/bind` | `{}`（内容忽略；`POST` 仍须带 `application/json` content-type） | 启动（或幂等复用）唯一的扫码绑定会话，等二维码 URL 就绪后返回 `{"ok":true,"url":...}`；URL 就绪前二维码已过期时 409 `bind_expired` |
+| `GET /channels/qq/bind` | 无 | 挂起等待绑定终态：成功返回与 `POST /channels/qq` 相同的变更结果，过期、失败或停机按错误码返回；未启动过会话时立即 409 `bind_not_started` |
 
 ```bash
 curl -X POST http://127.0.0.1:17890/channels/qq \
@@ -68,7 +70,27 @@ curl -X POST http://127.0.0.1:17890/channels/qq \
 # {"ok":true,"channel":"qq:<AppID>","state":"online"}
 ```
 
-成功响应固定为 `{"ok":true,"channel":"qq:<appId>","state":...}`；启动失败时 `state` 为 `blocked` 并附 `detail`（凭证已保存）。失败响应为 `{"error":{"code","message"}}` 加对应 HTTP 状态码；完整契约（错误码、重复 add、漂移拒绝、停机窗口）见 [channel 管理](docs/subsystems/channel-admin.md#admin-routes)。
+扫码绑定的三步流程：
+
+```bash
+# 1. 启动绑定会话，拿到二维码 URL
+curl -X POST http://127.0.0.1:17890/channels/qq/bind \
+  -H 'content-type: application/json' \
+  -d '{}'
+# {"ok":true,"url":"https://q.qq.com/qqbot/openclaw/connect.html?task_id=...&source=dsh-gateway&_wv=2"}
+
+# 2. 在手机 QQ 中打开落地页 URL 完成机器人绑定与授权；网关只返回 URL，
+#    不生成二维码图片，可在本机把 URL 转成二维码后用手机 QQ 扫
+
+# 3. 挂起等待结果；可能持续数分钟，客户端不要设置短的响应超时
+curl http://127.0.0.1:17890/channels/qq/bind
+# 成功：{"ok":true,"channel":"qq:<AppID>","state":"online"}
+# 二维码过期：HTTP 409 bind_expired，重新执行第 1 步换一张二维码
+```
+
+二维码 URL 短时效，只应交给扫码人：不要写入脚本、日志或提交到仓库。`GET /channels/qq/bind` 在会话进行中会一直挂起到终态（扫码成功、二维码过期、上游失败或网关停机），客户端必须允许长时间等待；未执行第 1 步就调用时立即返回 409 `bind_not_started`，不会挂起。二维码提前过期（URL 就绪前）时第 1 步本身可能返回 409 `bind_expired`，重新执行即可。
+
+`POST /channels/qq`、`POST /channels/qq/enable` 与扫码等待的成功响应统一为 `{"ok":true,"channel":"qq:<appId>","state":...}`；实例启动失败时 `state` 为 `blocked`，同步启动失败或启动被停机阻断时附 `detail`（凭证已保存），SDK 异步启动失败时只有 `blocked`（按 `manual_restart_required` 日志处置）。`POST /channels/qq/bind` 的成功响应为 `{"ok":true,"url":...}`。失败响应为 `{"error":{"code","message"}}` 加对应 HTTP 状态码；完整契约（错误码、重复 add、漂移拒绝、停机窗口、绑定会话生命周期）见 [channel 管理](docs/subsystems/channel-admin.md#admin-routes) 与[扫码绑定](docs/subsystems/channel-admin.md#qr-bind)。
 
 Windows PowerShell 中 `curl` 是 `Invoke-WebRequest` 的别名，需写 `curl.exe` 或改用 `Invoke-RestMethod`。`appSecret` 会进入 shell 历史与本机进程参数，脚本场景应从环境变量或文件读取；管理响应、日志与错误信息都不回显 `appSecret`。
 
@@ -223,7 +245,7 @@ Get-Content -LiteralPath '<workspace>/state/bindings.json' -Encoding utf8 -Raw |
 
 - 不设用户白名单。任何能向机器人发私聊的用户都能驱动本机 agent；机器人被公开或分享前应视为不可信入口。
 - 插件与 dsh 同进程，拥有 dsh 进程权限。插件或渠道异常可能影响 dsh，不能单独重启 gateway；插件崩溃后需要重新启动 dsh。单个 QQ 实例的启动失败不再影响进程与其他实例。
-- channel 管理路由仅绑定回环地址、本期无鉴权：同机任意本地进程都可添加或启用实例。`appSecret` 只写不读——管理响应、日志与错误信息一律不回显；调用方仍需避免它进入 shell 历史与本机进程参数。
+- channel 管理路由仅绑定回环地址、本期无鉴权：同机任意本地进程都可添加、启用或扫码绑定实例。`appSecret` 只写不读——管理响应、日志与错误信息一律不回显；调用方仍需避免它进入 shell 历史与本机进程参数。
 - 队列、运行中的 handle、出站计划和发送计数都在内存中。进程崩溃会丢失未处理消息和未发送回复，不重放、不补发。
 - 没有 exactly-once 或端到端 at-least-once 保证。SDK 默认去重窗口之外的重复推送可能再次执行；QQ 发送结果未知时不会重试，可能丢回复或出现迟到回复。
 - 映射持久化失败会使 core 进入 failed 并停止准入；dispose 未收敛、出站隔离或停机预算耗尽需要人工介入（重跑 enable 或重启）。

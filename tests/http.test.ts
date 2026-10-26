@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createGatewayLogger } from '../src/logging.js'
-import type { ChannelChangeResult, GatewayManagement, GatewayStatus, ManagementErrorCode } from '../src/management/contracts.js'
+import type {
+  ChannelChangeResult,
+  GatewayManagement,
+  GatewayStatus,
+  ManagementErrorCode,
+  QQBindStartResult,
+} from '../src/management/contracts.js'
 import { ManagementError } from '../src/management/contracts.js'
 import { createHttpRoutes } from '../src/http/routes.js'
-import type { ChannelSuccessBody, HttpReply } from '../src/http/protocol.js'
+import type { BindStartSuccessBody, ChannelSuccessBody, HttpReply } from '../src/http/protocol.js'
 
 /**
  * HTTP 路由层测试：直接调用 `createHttpRoutes` 返回的处理器（不开端口），验证路径/方法分派、
@@ -46,12 +52,22 @@ function makeHarness(options?: { status?: GatewayStatus }) {
       state: 'online',
     }),
   )
+  const bindQQStart = vi.fn(
+    async (): Promise<QQBindStartResult> => ({ url: 'https://q.qq.com/qqbot/connect?task=1' }),
+  )
+  const bindQQWait = vi.fn(
+    async (): Promise<ChannelChangeResult> => ({
+      channel: 'qq:app-1',
+      saved: true,
+      state: 'online',
+    }),
+  )
   const getStatus = vi.fn(() => status)
-  const management: GatewayManagement = { getStatus, addQQ, enableQQ }
+  const management: GatewayManagement = { getStatus, addQQ, enableQQ, bindQQStart, bindQQWait }
   const logs: LogLine[] = []
   const logger = createGatewayLogger({ debug: false, sink: (line) => logs.push(JSON.parse(line) as LogLine) })
   const routes = createHttpRoutes({ management, logger })
-  return { routes, status, addQQ, enableQQ, getStatus, logs }
+  return { routes, status, addQQ, enableQQ, bindQQStart, bindQQWait, getStatus, logs }
 }
 
 async function call(
@@ -174,6 +190,9 @@ describe('http routes: channel management', () => {
       { code: 'gateway_not_ready', status: 503 },
       { code: 'gateway_stopping', status: 503 },
       { code: 'config_write_failed', status: 500 },
+      { code: 'bind_failed', status: 502 },
+      { code: 'bind_expired', status: 409 },
+      { code: 'bind_not_started', status: 409 },
     ]
     for (const { code, status } of cases) {
       const h = makeHarness()
@@ -198,6 +217,95 @@ describe('http routes: channel management', () => {
   })
 })
 
+describe('http routes: qr bind', () => {
+  it('POST /channels/qq/bind 启动会话并返回 {"ok":true,"url":...}', async () => {
+    const h = makeHarness()
+
+    const reply = await call(h.routes, 'POST', '/channels/qq/bind', {})
+
+    expect(h.bindQQStart).toHaveBeenCalledTimes(1)
+    expect(h.bindQQWait).not.toHaveBeenCalled()
+    expect(h.addQQ).not.toHaveBeenCalled()
+    expect(reply).toEqual({
+      status: 200,
+      body: { ok: true, url: 'https://q.qq.com/qqbot/connect?task=1' },
+    })
+    const body = reply!.body as BindStartSuccessBody
+    expect(Object.keys(body).sort()).toEqual(['ok', 'url'])
+  })
+
+  it('POST /channels/qq/bind 不透传请求 body，响应只含 ok 与 url', async () => {
+    const h = makeHarness()
+    h.bindQQStart.mockResolvedValueOnce({ url: 'https://q.qq.com/qqbot/connect?task=2' })
+
+    const reply = await call(h.routes, 'POST', '/channels/qq/bind', { appId: 'ignored', force: true })
+
+    expect(h.bindQQStart).toHaveBeenCalledWith()
+    expect(reply).toEqual({
+      status: 200,
+      body: { ok: true, url: 'https://q.qq.com/qqbot/connect?task=2' },
+    })
+  })
+
+  it('GET /channels/qq/bind 等待终态并返回与 add 相同的成功体', async () => {
+    const h = makeHarness()
+    h.bindQQWait.mockResolvedValueOnce({
+      channel: 'qq:app-1',
+      saved: true,
+      state: 'blocked',
+      detail: 'sdk start failed; the credentials were saved',
+    })
+
+    const reply = await call(h.routes, 'GET', '/channels/qq/bind')
+
+    expect(h.bindQQWait).toHaveBeenCalledTimes(1)
+    expect(h.bindQQStart).not.toHaveBeenCalled()
+    expect(h.addQQ).not.toHaveBeenCalled()
+    expect(reply).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        channel: 'qq:app-1',
+        state: 'blocked',
+        detail: 'sdk start failed; the credentials were saved',
+      },
+    })
+    const body = reply!.body as ChannelSuccessBody & Record<string, unknown>
+    expect(body.saved).toBeUndefined()
+  })
+
+  it('非 ManagementError 从 bind 路由上抛，交给 server 记 500', async () => {
+    const h = makeHarness()
+    h.bindQQWait.mockRejectedValueOnce(new Error('wait exploded'))
+    await expect(call(h.routes, 'GET', '/channels/qq/bind')).rejects.toThrow('wait exploded')
+  })
+
+  it('bind 路由同样把 ManagementError 映射为对应状态码', async () => {
+    const h = makeHarness()
+
+    h.bindQQStart.mockRejectedValueOnce(new ManagementError('gateway_not_ready', 'core is starting'))
+    expect(await call(h.routes, 'POST', '/channels/qq/bind', {})).toEqual({
+      status: 503,
+      body: { error: { code: 'gateway_not_ready', message: 'core is starting' } },
+    })
+
+    const cases: readonly { code: ManagementErrorCode; status: number }[] = [
+      { code: 'bind_expired', status: 409 },
+      { code: 'bind_not_started', status: 409 },
+      { code: 'bind_failed', status: 502 },
+      { code: 'gateway_stopping', status: 503 },
+    ]
+    for (const { code, status } of cases) {
+      h.bindQQWait.mockRejectedValueOnce(new ManagementError(code, `message for ${code}`))
+      const reply = await call(h.routes, 'GET', '/channels/qq/bind')
+      expect(reply, code).toEqual({
+        status,
+        body: { error: { code, message: `message for ${code}` } },
+      })
+    }
+  })
+})
+
 describe('http routes: unknown paths and methods', () => {
   it('未命中路径或方法返回 undefined，且不触发管理操作', async () => {
     const h = makeHarness()
@@ -205,6 +313,10 @@ describe('http routes: unknown paths and methods', () => {
       { method: 'GET', path: '/channels/qq' },
       { method: 'PUT', path: '/channels/qq', body: {} },
       { method: 'GET', path: '/channels/qq/enable' },
+      { method: 'PUT', path: '/channels/qq/bind', body: {} },
+      { method: 'DELETE', path: '/channels/qq/bind' },
+      { method: 'GET', path: '/channels/qq/bind/' },
+      { method: 'POST', path: '/channels/qq/bind/enable', body: {} },
       { method: 'POST', path: '/livez', body: {} },
       { method: 'POST', path: '/readyz', body: {} },
       { method: 'GET', path: '/unknown' },
@@ -215,6 +327,8 @@ describe('http routes: unknown paths and methods', () => {
     }
     expect(h.addQQ).not.toHaveBeenCalled()
     expect(h.enableQQ).not.toHaveBeenCalled()
+    expect(h.bindQQStart).not.toHaveBeenCalled()
+    expect(h.bindQQWait).not.toHaveBeenCalled()
     expect(h.getStatus).not.toHaveBeenCalled()
   })
 })

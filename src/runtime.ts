@@ -4,6 +4,8 @@ import pkg from '../package.json' with { type: 'json' }
 import { createChannelManager } from './channels/manager.js'
 import type { QQChannelFactory } from './channels/manager.js'
 import { createQQChannel } from './channels/qq/index.js'
+import { createQQBindConnector } from './channels/qq/qr-connect.js'
+import type { QQBindConnector } from './channels/qq/qr-connect.js'
 import { createQQTokenValidator } from './channels/qq/token.js'
 import type { QQCredentialValidator } from './channels/qq/token.js'
 import { resolveGatewayWorkspace, GATEWAY_CONFIG_SCHEMA_VERSION } from './config/schema.js'
@@ -49,6 +51,8 @@ export interface GatewayLaunchOptions {
   createQQChannelAdapter?: QQChannelFactory
   /** QQ 凭证在线校验（管理路由 add 用；测试替身避免真实网络）。 */
   validateQQCredentials?: QQCredentialValidator
+  /** QQ 扫码绑定连接器（测试替身避免真实腾讯网络；缺省用官方连接器）。 */
+  qqBindConnector?: QQBindConnector
   /** 结构化日志 sink（默认逐行 stdout）；测试捕获启动摘要与失败事件。 */
   loggerSink?: (line: string) => void
   /**
@@ -173,6 +177,8 @@ export function launchGateway(
     manager,
     status,
     validateQQCredentials: options?.validateQQCredentials ?? createQQTokenValidator(),
+    // 扫码绑定连接器：正式入口用腾讯官方实现（不打印终端二维码），测试注入替身不联网。
+    qqBindConnector: options?.qqBindConnector ?? createQQBindConnector(),
     coreState: () => core.query.snapshot().state,
   })
   const routes = createHttpRoutes({ management, logger })

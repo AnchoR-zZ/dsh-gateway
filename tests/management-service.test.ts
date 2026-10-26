@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createChannelManager } from '../src/channels/manager.js'
 import type { ChannelManager } from '../src/channels/manager.js'
+import type { QQBindCallbacks, QQBindConnector, QQBindCredentials } from '../src/channels/qq/qr-connect.js'
 import { QQCredentialCheckError } from '../src/channels/qq/token.js'
 import { GATEWAY_LIMITS } from '../src/contracts.js'
 import type { GatewayCore } from '../src/contracts.js'
@@ -15,8 +16,9 @@ import { GATEWAY_CONFIG_FILENAME, loadGatewayConfigStore } from '../src/config/s
 import type { GatewayConfigStore } from '../src/config/store.js'
 import type { ChannelState, CoreQueries, CoreState } from '../src/core/contracts.js'
 import { createGatewayLogger } from '../src/logging.js'
+import { BIND_ABORTED_MESSAGE } from '../src/management/binding.js'
 import { ManagementError } from '../src/management/contracts.js'
-import type { ChannelChangeResult } from '../src/management/contracts.js'
+import type { ChannelChangeResult, QQBindStartResult } from '../src/management/contracts.js'
 import { createManagementService } from '../src/management/service.js'
 import type { ManagementService } from '../src/management/service.js'
 import { createStatusProjection } from '../src/management/status.js'
@@ -56,12 +58,16 @@ interface Harness {
   stateMap: Map<string, ChannelState>
   failAppIds: Set<string>
   validate: ReturnType<typeof vi.fn>
+  /** 扫码绑定连接器替身：记录回调，由测试显式触发扫码事件。 */
+  bind: ReturnType<typeof createFakeBindConnector>
   logs: LogLine[]
   configPath: string
   workspace: string
   coreState: { value: CoreState }
   add(body: unknown): Promise<ChannelChangeResult>
   enable(body: unknown): Promise<ChannelChangeResult>
+  bindStart(): Promise<QQBindStartResult>
+  bindWait(): Promise<ChannelChangeResult>
 }
 
 let tempRoots: string[] = []
@@ -137,6 +143,45 @@ async function captureManagementError(operation: Promise<unknown>): Promise<Mana
     return err as ManagementError
   }
   throw new Error('expected the operation to reject with ManagementError')
+}
+
+/**
+ * 扫码绑定连接器替身：只记录回调与 AbortSignal，不发起任何网络请求；测试显式触发
+ * 二维码展示、扫码成功等事件。`fireExpired` 模拟真实上游收到 EXPIRED 后中止轮询并以
+ * `onFailure` 收尾的顺序（见 `src/channels/qq/qr-connect.ts` 的适配层说明）。
+ */
+function createFakeBindConnector() {
+  const state: { calls: number; callbacks?: QQBindCallbacks; signal?: AbortSignal } = { calls: 0 }
+  const connector: QQBindConnector = (callbacks, options) => {
+    state.calls += 1
+    state.callbacks = callbacks
+    state.signal = options.signal
+  }
+  return {
+    connector,
+    get calls(): number {
+      return state.calls
+    },
+    get callbacks(): QQBindCallbacks | undefined {
+      return state.callbacks
+    },
+    get signal(): AbortSignal | undefined {
+      return state.signal
+    },
+    fireDisplayed(url: string): void {
+      state.callbacks?.onQrDisplayed(url)
+    },
+    fireSuccess(credentials: readonly QQBindCredentials[]): void {
+      state.callbacks?.onSuccess(credentials)
+    },
+    fireFailure(error: Error): void {
+      state.callbacks?.onFailure(error)
+    },
+    fireExpired(): void {
+      state.callbacks?.onQrExpired()
+      state.callbacks?.onFailure(new Error('已取消'))
+    },
+  }
 }
 
 function makeHarness(
@@ -224,6 +269,7 @@ function makeHarness(
     }),
   }
   const status = createStatusProjection({ queries, currentQQInstances: () => store.file.channels.qq })
+  const bind = createFakeBindConnector()
 
   const service = createManagementService({
     logger,
@@ -231,6 +277,7 @@ function makeHarness(
     manager,
     status,
     validateQQCredentials: validate as unknown as (appId: string, appSecret: string) => Promise<void>,
+    qqBindConnector: bind.connector,
     coreState: () => coreState.value,
   })
 
@@ -243,12 +290,15 @@ function makeHarness(
     stateMap,
     failAppIds,
     validate,
+    bind,
     logs,
     configPath,
     workspace,
     coreState,
     add: (body) => service.addQQ(body),
     enable: (body) => service.enableQQ(body),
+    bindStart: () => service.bindQQStart(),
+    bindWait: () => service.bindQQWait(),
   }
 }
 
@@ -662,6 +712,89 @@ describe('management service: enableQQ', () => {
 
     expect(error.code).toBe('config_modified_externally')
     expect(h.records).toHaveLength(0)
+  })
+})
+
+describe('management service: qr bind', () => {
+  it('bindQQStart 在 core 未 ready 或停机闸门关闭时拒绝', async () => {
+    const notReady = makeHarness([], { coreState: 'starting' })
+    const notReadyError = await captureManagementError(notReady.bindStart())
+    expect(notReadyError.code).toBe('gateway_not_ready')
+    expect(notReadyError.message).toContain('retry after startup')
+    expect(notReady.bind.calls).toBe(0)
+
+    const h = makeHarness([])
+    h.service.beginShutdown()
+    const stoppingError = await captureManagementError(h.bindStart())
+    expect(stoppingError.code).toBe('gateway_stopping')
+    expect(h.bind.calls).toBe(0)
+  })
+
+  it('扫码成功：跳过凭证校验，写入配置、启动实例并记录 channel_added', async () => {
+    const h = makeHarness([], {
+      validateImpl: async () => {
+        throw new Error('the QR flow must not call the credential validator')
+      },
+    })
+    const url = 'https://q.qq.com/qqbot/connect?task=1'
+
+    const starting = h.bindStart()
+    expect(h.bind.calls).toBe(1)
+    h.bind.fireDisplayed(url)
+    await expect(starting).resolves.toEqual({ url })
+
+    const waiting = h.bindWait()
+    h.bind.fireSuccess([{ appId: '  bind-app  ', appSecret: '  bind-secret  ' }])
+    await expect(waiting).resolves.toEqual({ channel: 'qq:bind-app', saved: true, state: 'online' })
+
+    // 扫码已完成腾讯侧认证：不再走凭证在线校验（注入的校验器会抛错）。
+    expect(h.validate).not.toHaveBeenCalled()
+    expect(readConfigOnDisk(h.configPath).channels.qq).toEqual([
+      { appId: 'bind-app', appSecret: 'bind-secret', enabled: true },
+    ])
+    expect(h.channels.get('bind-app')?.startCalls).toBe(1)
+    expect(h.channels.get('bind-app')?.appSecret).toBe('bind-secret')
+    expect(h.logs.some((line) => line.event === 'channel_added' && line.appId === 'bind-app')).toBe(true)
+    expect(JSON.stringify(h.logs)).not.toContain('bind-secret')
+  })
+
+  it('扫码成功但实例启动失败：配置已保存，返回 blocked 与 "the credentials were saved"', async () => {
+    const h = makeHarness([], {
+      startError: (appSecret) => new Error(`login failed secret=${appSecret}`),
+    })
+    const starting = h.bindStart()
+    h.bind.fireDisplayed('https://q.qq.com/qqbot/connect?task=1')
+    await starting
+
+    const waiting = h.bindWait()
+    h.bind.fireSuccess([{ appId: 'bind-app', appSecret: 'bind-secret' }])
+    const result = await waiting
+
+    expect(result.saved).toBe(true)
+    expect(result.channel).toBe('qq:bind-app')
+    expect(result.state).toBe('blocked')
+    expect(result.detail).toContain('the credentials were saved')
+    expect(JSON.stringify(result)).not.toContain('bind-secret')
+    expect(readConfigOnDisk(h.configPath).channels.qq).toEqual([
+      { appId: 'bind-app', appSecret: 'bind-secret', enabled: true },
+    ])
+  })
+
+  it('会话等待期间停机：bindQQWait 以 gateway_stopping 结束，settle 立即收敛', async () => {
+    const h = makeHarness([])
+    const starting = h.bindStart()
+    h.bind.fireDisplayed('https://q.qq.com/qqbot/connect?task=1')
+    await starting
+
+    const waiting = h.bindWait()
+    h.service.beginShutdown()
+
+    const error = await captureManagementError(waiting)
+    expect(error.code).toBe('gateway_stopping')
+    expect(error.message).toBe(BIND_ABORTED_MESSAGE)
+    // 停机 abort 连接器轮询，挂起的等待方不会被永久悬挂；settle 无在途操作可等。
+    expect(h.bind.signal?.aborted).toBe(true)
+    expect(await h.service.settle(0)).toBe(true)
   })
 })
 

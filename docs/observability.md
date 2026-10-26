@@ -1,23 +1,27 @@
 # 健康、状态与日志
 
-本页描述本机 HTTP 监听的所有权与启停位置、健康探针与管理路由的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理业务与管理路由的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/http/server.ts`](../src/http/server.ts)、[`src/http/routes.ts`](../src/http/routes.ts)、[`src/management/service.ts`](../src/management/service.ts)、[`src/management/status.ts`](../src/management/status.ts)、[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/channels/qq/index.ts`](../src/channels/qq/index.ts)。
+本页描述本机 HTTP 监听的所有权与启停位置、健康探针与管理路由（含扫码绑定等待接口）的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理业务与管理路由的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/http/server.ts`](../src/http/server.ts)、[`src/http/routes.ts`](../src/http/routes.ts)、[`src/management/service.ts`](../src/management/service.ts)、[`src/management/binding.ts`](../src/management/binding.ts)、[`src/channels/qq/qr-connect.ts`](../src/channels/qq/qr-connect.ts)、[`src/management/status.ts`](../src/management/status.ts)、[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/channels/qq/index.ts`](../src/channels/qq/index.ts)。
 
 <a id="readiness"></a>
 
 ## 健康探针与管理路由
 
-本机 HTTP 监听由 runtime 组装并拥有（[`src/runtime.ts`](../src/runtime.ts) 创建 [`createHttpServer`](../src/http/server.ts) 与 [`createHttpRoutes`](../src/http/routes.ts)，不属于 core 或管理服务），默认绑定 `127.0.0.1:17890`。`GET` 探针只读，另有仅本机、仅 channel 管理的 `POST` 管理路由（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用（例如已有实例在运行）时启动失败（runtime 记录 `manual_restart_required` 并回滚），不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。
+本机 HTTP 监听由 runtime 组装并拥有（[`src/runtime.ts`](../src/runtime.ts) 创建 [`createHttpServer`](../src/http/server.ts) 与 [`createHttpRoutes`](../src/http/routes.ts)，不属于 core 或管理服务），默认绑定 `127.0.0.1:17890`。`GET` 探针只读，另有仅本机、无鉴权的 channel 管理路由：三个 `POST` 入口与扫码绑定的 `GET` 等待接口（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用（例如已有实例在运行）时启动失败（runtime 记录 `manual_restart_required` 并回滚），不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。
 
 | 请求 | 状态码 | 响应正文 | 条件 |
 |---|---|---|---|
 | `GET /livez` | 200 | `{"status":"ok"}` | 监听存在即返回，不检查 core、store 或渠道状态 |
 | `GET /readyz` | 200 或 503 | 管理状态投影 JSON | 状态投影的 `ready` 为真返回 200，否则 503 |
 | `POST /channels/qq`、`POST /channels/qq/enable` | 200/400/404/409/422/503/500 | 成功 `{"ok":...}` 或 `{"error":{"code","message"}}` | 仅 `POST` + `application/json`（否则 404/400）；契约见 [管理路由](subsystems/channel-admin.md#admin-routes) |
+| `POST /channels/qq/bind` | 200/400/409/502/503 | `{"ok":true,"url":...}` 或错误正文 | 仅 `POST` + `application/json`（否则 404/400）；二维码在 URL 就绪前过期时 409；契约见 [扫码绑定](subsystems/channel-admin.md#qr-bind) |
+| `GET /channels/qq/bind` | 200/409/500/502/503 | 成功同 `POST /channels/qq`，或错误正文 | 挂起等待绑定终态，无响应期限；契约见 [扫码绑定](subsystems/channel-admin.md#qr-bind) |
 | 其他路径或方法 | 404 | `{"error":"not found"}` | 不区分路径是否存在，也不提供其他控制语义 |
 
 查询串在匹配前被去掉，`/livez?probe=1` 与 `/livez` 等价；所有响应都带 `content-type: application/json`。管理请求 body 上限 64 KiB，坏 JSON、读取中断与非 JSON 内容类型按 400（`invalid_request`）拒绝；未命中路径或方法回 404 `{"error":"not found"}`；处理器抛出非管理异常时回 500（`internal_error`）并记一条 `state_warning`（`reason` 以 `admin request failed:` 开头）。
 
 就绪谓词由 [`src/management/status.ts`](../src/management/status.ts) 的 `createStatusProjection` 计算，`/readyz` 与管理服务的 `getStatus()` 使用同一份结果，要求三项同时成立：core 状态为 `ready`、映射 store 未进入 failed、健康渠道表中除 `disabled` 与 `not_configured` 外的条目全部为 `online`。因此已启用实例处于 `connecting`/`reconnecting`/`blocked`（含"enabled 但未注册"的 `blocked` 铺底值）时整体 503；`not_configured` 与 `disabled` 条目不影响就绪，零渠道实例（空数组或全部 disabled）时 `/readyz` 返回 200。
+
+扫码绑定会话不进入状态投影：绑定进行中、等待扫码或二维码过期都不改变上述判定与 `channels` 表；扫码成功并启动实例后，实例按常规渠道状态参与就绪判定。
 
 `/readyz` 正文由状态投影的 `GatewayStatus` 投影成五个键，`channels` 由实例状态数组压平为按键索引的对象：
 
@@ -33,7 +37,7 @@
 
 监听在 runtime 启动链的第一步绑定，先于 core 启动：core 处于 `starting` 期间 `/livez` 已返回 200，`/readyz` 返回 503 且 `coreState` 为 `starting`、`startedAt` 为空字符串。绑定失败时 `http.start()` 拒绝、core 不启动，runtime 记录 `manual_restart_required`（`gateway startup failed: ...`）并回滚已创建资源；core 启动失败（如状态映射加载失败）时 core 状态保持 `starting` 且不自行清理资源，同样由 runtime 记录 `manual_restart_required` 后回滚（停止 core 与渠道实例、关闭 HTTP）。
 
-停止链先关闭管理写入入口与新的实例启动，HTTP 监听最后关闭：停止期间 `/livez` 仍返回 200，管理写请求以 `gateway_stopping` 被拒（HTTP 503），已保存的配置保留但不启动实例；runtime 在总预算内并行等待启动任务收敛（若启动尚未完成）、管理在途操作落定、core 停止与全部实例停止，然后才关闭监听，因此 disposer 返回后不会再出现迟到监听。监听关闭时强制断开保持连接，避免探测客户端的 keep-alive 池拖住关闭，关闭后对该端口的连接被拒绝而不是返回 503。关闭失败只记 `state_warning`。监听创建后挂接的 `error` 事件（含启动期绑定失败）记一条 `state_warning`（`reason` 以 `http server error:` 开头），不改变任何状态。
+停止链先关闭管理写入入口与新的实例启动，HTTP 监听最后关闭：停止期间 `/livez` 仍返回 200，管理写请求以 `gateway_stopping` 被拒（HTTP 503），进行中的扫码绑定等待请求同样以 503 收尾，已保存的配置保留但不启动实例；runtime 在总预算内并行等待启动任务收敛（若启动尚未完成）、管理在途操作落定、core 停止与全部实例停止，然后才关闭监听，因此 disposer 返回后不会再出现迟到监听。监听关闭时强制断开保持连接，避免探测客户端的 keep-alive 池拖住关闭，关闭后对该端口的连接被拒绝而不是返回 503。关闭失败只记 `state_warning`。监听创建后挂接的 `error` 事件（含启动期绑定失败）记一条 `state_warning`（`reason` 以 `http server error:` 开头），不改变任何状态。
 
 <a id="state-machines"></a>
 
@@ -87,7 +91,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `startup_summary` | runtime 组装时、core 创建之前记录一次启动摘要 | `version`、`schemaVersion`、`configSchemaVersion`、`provider`、`model`、`policy`、`maxConcurrent`、`maxLiveAgents` |
 | `config_template_created` | 首次启动创建了 v2 配置模板（零实例） | `reason`（含模板路径与添加机器人的指引） |
 | `config_migrated` | 配置文件由 v1 自动迁移为 v2 并写回 | `reason`（含文件路径） |
-| `channel_added` | 管理服务成功添加/更新一个 QQ 实例 | `channelId`、`appId`、`outcome`（响应时状态） |
+| `channel_added` | 管理服务成功添加/更新一个 QQ 实例（含扫码绑定成功落盘） | `channelId`、`appId`、`outcome`（响应时状态） |
 | `channel_enabled` | 管理服务启用（或幂等确认）一个 QQ 实例 | `channelId`、`appId`、`outcome` |
 | `queued` | core 准入接受入站并同步入队 | `requestId`、`channelId`、`bindingId`、`messageId`、`inputLength` |
 | `inbound_ignored` | 入站被过滤或忽略：渠道过滤失败、core 形态校验或身份键失败、出队前已过期、停机丢弃队列、出站隔离期间、入站处理器异常 | 渠道侧 `messageId`、`reason`、`outcome`、`attachmentCount`、`inputLength`；core 侧 `reason`，出队或丢队列路径另带 `requestId`、`bindingId`、`messageId`，形态校验路径带 `channelId`、`generation` |
@@ -106,6 +110,8 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `channel_reconnecting` | 渠道进入 `reconnecting` | `channelId`、`generation`；QQ 侧归因行另带 `reason` |
 | `manual_restart_required` | 需要人工介入，触发点见[状态机](#state-machines) | `reason`；部分带 `channelId`、`generation`，或 `bindingId`、`sessionId` |
 | `shutdown` | core 停止协调器结束，或 QQ SDK 的 `start()` 在未停止渠道的情况下 resolve | 正常结束只有 `event` 与 `time`；预算耗尽时 `reason` 为 `budget_exhausted`；QQ 场景带 `channelId` 与 `reason` |
+
+扫码绑定不新增日志事件：成功落盘与启动复用 `channel_added`（字段相同），绑定会话自身的可预期失败只通过 HTTP 响应返回、不记日志事件；扫码成功后的实例启动失败仍走既有日志（`channel_added` 的 `outcome` 与 `manual_restart_required`）。二维码 URL 与 `task_id` 不主动写入日志。
 
 渠道进入 `reconnecting` 或 `blocked` 时，渠道侧与 core 侧会各记一行：QQ 先记带原因的 `channel_reconnecting` 或 `manual_restart_required`，core 随后记状态行；释放未收敛等路径也可能由会话管理器与 core 各记一条 `manual_restart_required`。字段互补，按 `channelId`、`bindingId` 与时间聚合，不要按行数统计故障数。
 
@@ -156,6 +162,8 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 脱敏在序列化前执行：`logEvent` 只对 `error` 与 `reason` 两个字段调用 `redact`，其他字段原样输出；`debugBody` 对 `text` 脱敏；`sdk_log` 对 `message` 与序列化后的 `meta` 脱敏。
 
+扫码绑定的二维码 URL 与其 `task_id` 只通过 `POST /channels/qq/bind` 的成功响应交给调用方，网关不主动写入日志；绑定失败时进入 `error`/`reason` 与错误正文的上游文本会先经过 `task_id` 参数值清洗与上述 `redact` 脱敏（见 [`src/management/binding.ts`](../src/management/binding.ts) 的 `describeFailure`）。扫码得到的 `appSecret` 按上述规则恒不输出。
+
 `LogFields` 不提供原始 `user_openid` 字段；`appId` 字段携带实例标识（QQ 机器人 AppID，channel 管理事件使用，`appSecret` 恒不输出）。`bindingId` 在 QQ 下由 `qq_<AppID>_<user_openid>` 组成，会随 `queued`、会话事件、准入拒绝、提示投递与 core 的 turn 失败事件输出，日志文件与采集链路应按敏感数据保护。探针正文不含用户标识、`sessionId` 与错误原文；AppID 以实例键 `qq:<AppID>` 的形式出现在 `channels` 表中（见[健康探针与管理路由](#readiness)）。
 
 默认不记录消息正文、工具参数或模型推理：事件字段集里没有正文字段，唯一能写出正文的 `debugBody` 在源码中没有调用点，因此即使配置 `debug: true` 也不会产生 `debug_body` 行。`debug` 在创建日志器时固定，切换需要重启；正文与 `error`/`reason` 的脱敏始终生效。
@@ -172,4 +180,4 @@ QQ SDK 自身的日志由独立适配器写成 `sdk_log` JSON 行，默认 `cons
 |---|---|
 | Windows 上父目录 `fsync` 可能以 `EPERM` 失败，只记一条 `state_warning`，事务仍判成功，且每个 store 实例只告警一次 | 写入成功不再蕴含父目录已同步；该告警是唯一信号，且每个 store 实例只出现一次，事务结果、store 健康与 `/readyz` 都不受影响 |
 | LRU 逐出、陈旧 handle 释放超时，或 `dispose` 返回后 session 仍在 live registry，只记 `manual_restart_required`（部分路径为 `state_warning`），core 与就绪状态不变 | 存在这类不可复用 handle 时 `/readyz` 仍返回 200，就绪探针不能替代对告警日志的人工处理；turn 路径的释放超时除外，它经 `dispose_did_not_converge` 使 core 转 `failed` |
-| 管理路由本期无鉴权，仅靠回环绑定限制为本机访问 | 同机任意本地进程可增改 channel 实例；部署方需自行限制本机进程可信度 |
+| 管理路由本期无鉴权，仅靠回环绑定限制为本机访问 | 同机任意本地进程可增改或扫码绑定 channel 实例；部署方需自行限制本机进程可信度 |

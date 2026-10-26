@@ -26,6 +26,14 @@ export const CHANNEL_ADD_PATH = '/channels/qq'
 /** 启用 QQ 渠道实例的管理路径。 */
 export const CHANNEL_ENABLE_PATH = '/channels/qq/enable'
 
+/**
+ * 扫码绑定 QQ 机器人实例的管理路径。
+ *
+ * - `POST`：启动（或幂等复用）绑定会话，等二维码 URL 就绪后返回它；
+ * - `GET`：挂起等待会话终态，成功返回与 add 相同的变更结果。
+ */
+export const CHANNEL_BIND_PATH = '/channels/qq/bind'
+
 /** 管理请求 body 的字节上限；超出按 400 拒绝。 */
 export const ADMIN_BODY_LIMIT_BYTES = 65_536
 
@@ -64,6 +72,12 @@ export interface ChannelSuccessBody {
   readonly channel: string
   readonly state: ChannelHealthState
   readonly detail?: string
+}
+
+/** 扫码绑定启动应答正文：`{"ok":true,"url":"https://q.qq.com/..."}`。 */
+export interface BindStartSuccessBody {
+  readonly ok: true
+  readonly url: string
 }
 
 /** 未命中任何路由时的 404 正文（沿用探测器的简短形态）。 */

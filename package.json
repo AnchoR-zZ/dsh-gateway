@@ -37,6 +37,7 @@
     "@deepseek-ai/schemastery": "^3.18.5"
   },
   "dependencies": {
+    "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.5",
     "marked": "^18.1.1"
   },

@@ -40,9 +40,9 @@ export interface GatewayStatus {
 
 /**
  * 管理业务错误的稳定 code。HTTP 映射：`invalid_request`/`app_id_required` → 400，
- * `instance_not_found` → 404，`config_modified_externally` → 409，
+ * `instance_not_found` → 404，`config_modified_externally`/`bind_expired`/`bind_not_started` → 409，
  * `credential_validation_failed` → 422，`gateway_not_ready`/`gateway_stopping` → 503，
- * `config_write_failed` → 500。
+ * `bind_failed` → 502，`config_write_failed` → 500。
  */
 export type ManagementErrorCode =
   | 'invalid_request'
@@ -53,6 +53,12 @@ export type ManagementErrorCode =
   | 'gateway_not_ready'
   | 'gateway_stopping'
   | 'config_write_failed'
+  /** 扫码绑定上游失败（创建绑定任务、解密/解析扫码结果、返回非法凭据或绑定流水线异常）。 */
+  | 'bind_failed'
+  /** 二维码已过期，绑定会话终止；重新 POST 启动即可刷新。 */
+  | 'bind_expired'
+  /** 尚未启动绑定会话就查询结果。 */
+  | 'bind_not_started'
 
 /** 可预期的管理失败；message 不含 `appSecret`，也不带 HTTP 状态码。 */
 export class ManagementError extends Error {
@@ -77,6 +83,12 @@ export interface ChannelChangeResult {
   readonly detail?: string
 }
 
+/** 扫码绑定启动结果：腾讯侧的二维码 URL，由调用方自行展示。 */
+export interface QQBindStartResult {
+  /** 二维码落地页 URL（`q.qq.com`）；短时效，不写日志、不持久化。 */
+  readonly url: string
+}
+
 /** 管理业务能力；HTTP 与管理入口都只通过本接口执行业务流程。 */
 export interface GatewayManagement {
   getStatus(): GatewayStatus
@@ -89,4 +101,17 @@ export interface GatewayManagement {
 
   /** 启用一个 QQ 实例：置 `enabled: true` 并对未在线实例立即启动。 */
   enableQQ(input: unknown): Promise<ChannelChangeResult>
+
+  /**
+   * 启动（或幂等复用）扫码绑定会话，等二维码 URL 就绪后返回。
+   * core 未 ready 或停机闸门关闭时抛 `gateway_not_ready` / `gateway_stopping`。
+   */
+  bindQQStart(): Promise<QQBindStartResult>
+
+  /**
+   * 等待扫码绑定会话终态：扫码成功返回实例变更结果（已自动落盘并启动），二维码过期抛
+   * `bind_expired`，上游失败抛 `bind_failed`，停机作废抛 `gateway_stopping`，从未启动
+   * 会话抛 `bind_not_started`。没有总超时，由二维码过期或会话终止收尾。
+   */
+  bindQQWait(): Promise<ChannelChangeResult>
 }

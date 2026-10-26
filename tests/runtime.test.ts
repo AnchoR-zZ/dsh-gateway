@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
 import type { QQChannel, QQChannelOptions } from '../src/channels/qq/index.js'
+import type { QQBindCallbacks, QQBindConnector, QQBindCredentials } from '../src/channels/qq/qr-connect.js'
 import { QQCredentialCheckError } from '../src/channels/qq/token.js'
 import { GatewayConfigError } from '../src/config/schema.js'
 import type { GatewayConfigFile } from '../src/config/schema.js'
@@ -211,6 +212,34 @@ function createFakeQQFactory() {
     failAppIds,
     handleOf(appId: string): FakeChannelHandle | undefined {
       return handles.get(appId)
+    },
+  }
+}
+
+/**
+ * 扫码绑定连接器替身：只记录回调与 AbortSignal，测试显式触发二维码展示/扫码成功，
+ * 不发起任何腾讯网络请求。
+ */
+function createFakeBindConnector() {
+  const calls: { callbacks: QQBindCallbacks; signal: AbortSignal }[] = []
+  const latest = () => {
+    const call = calls[calls.length - 1]
+    if (call === undefined) {
+      throw new Error('the fake QQ bind connector has not been invoked yet')
+    }
+    return call
+  }
+  const connector: QQBindConnector = (callbacks, options) => {
+    calls.push({ callbacks, signal: options.signal })
+  }
+  return {
+    connector,
+    calls,
+    display(url: string): void {
+      latest().callbacks.onQrDisplayed(url)
+    },
+    succeed(credentials: readonly QQBindCredentials[]): void {
+      latest().callbacks.onSuccess(credentials)
     },
   }
 }
@@ -896,6 +925,71 @@ describe('launchGateway admin wiring', () => {
     expect(onDisk.channels.qq).toEqual([])
 
     await fakeCtx.disposeAll()
+  })
+})
+
+describe('launchGateway qr bind wiring', () => {
+  it('POST 启动扫码、GET 等待终态：成功后落盘并启动实例，跳过凭证在线校验', async () => {
+    const fixture = makeEnv({ schemaVersion: 2, channels: { qq: [] } })
+    const fakeCtx = createFakeCordisCtx({ dshHomePath: fixture.dshHome })
+    const logs = createLoggerCapture()
+    const qq = createFakeQQFactory()
+    const bind = createFakeBindConnector()
+    const port = await reservePort()
+    const validate = vi.fn(async () => {
+      throw new Error('the QR flow must not call the credential validator')
+    })
+
+    launchGateway(
+      fakeCtx.ctx,
+      fixture.env,
+      makeLaunchOptions(qq, logs, port, {
+        qqBindConnector: bind.connector,
+        validateQQCredentials: validate,
+      }),
+    )
+    await waitForStatus(port, '/readyz', 200)
+
+    const url = 'https://q.qq.com/qqbot/connect?task=runtime-1'
+    const post = fetch(`http://127.0.0.1:${port}/channels/qq/bind`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    }).then(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    }))
+
+    await waitFor(() => bind.calls.length === 1)
+    bind.display(url)
+    expect(await post).toEqual({ status: 200, body: { ok: true, url } })
+
+    // GET 会挂起直到会话终态；先发起请求，再让替身完成扫码（终态保留，先后顺序不影响结果）。
+    const get = fetch(`http://127.0.0.1:${port}/channels/qq/bind`).then(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    }))
+    bind.succeed([{ appId: 'qr-app-id', appSecret: 'qr-app-secret' }])
+
+    expect(await get).toEqual({
+      status: 200,
+      body: { ok: true, channel: 'qq:qr-app-id', state: 'online' },
+    })
+    // 扫码已由腾讯侧完成认证：不再调用凭证在线校验；实例由替身工厂启动（不触真实 QQ 网络）。
+    expect(validate).not.toHaveBeenCalled()
+    expect(bind.calls).toHaveLength(1)
+    expect(qq.handleOf('qr-app-id')?.startCalls).toBe(1)
+    const onDisk = JSON.parse(readFileSync(fixture.configPath, 'utf8')) as {
+      channels: { qq: unknown[] }
+    }
+    expect(onDisk.channels.qq).toEqual([
+      { appId: 'qr-app-id', appSecret: 'qr-app-secret', enabled: true },
+    ])
+    expect(logs.lines.some((line) => line.event === 'channel_added' && line.appId === 'qr-app-id')).toBe(true)
+    expect(JSON.stringify(logs.lines)).not.toContain('qr-app-secret')
+
+    await fakeCtx.disposeAll()
+    expect(qq.handleOf('qr-app-id')?.stopCalls).toBe(1)
   })
 })
 
