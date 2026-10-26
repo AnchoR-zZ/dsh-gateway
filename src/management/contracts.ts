@@ -1,9 +1,9 @@
 import type { ChannelState, CoreState } from '../core/contracts.js'
 
 /**
- * 管理业务契约：管理命令的输入/输出、状态查询结果与稳定的业务错误码。
+ * 管理业务契约：管理请求的输入/输出、状态查询结果与稳定的业务错误码。
  *
- * 本模块不包含 HTTP 状态码；网络协议 DTO 在 `src/http/protocol.ts`，管理命令到 HTTP 响应
+ * 本模块不包含 HTTP 状态码；网络协议 DTO 在 `src/http/protocol.ts`，管理请求到 HTTP 响应
  * 的映射由 `src/http/routes.ts` 负责。管理输入来自不可信 JSON，形状与业务字段由管理服务
  * 校验，失败一律抛带稳定 `code` 的 `ManagementError`。所有权：管理服务拥有 add/enable 的
  * 流程；ConfigStore 拥有配置写入；ChannelManager 拥有运行实例。

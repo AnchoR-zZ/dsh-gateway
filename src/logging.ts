@@ -36,7 +36,7 @@ export type GatewayLogEvent =
   | 'shutdown'
   /** T10 新增：启动摘要（14 节）——版本、映射 schema、provider/model 与有效策略；不 dump 环境或完整配置。 */
   | 'startup_summary'
-  /** channel 管理面：首次启动创建了配置模板（零实例，指引 CLI 添加）。 */
+  /** channel 管理面：首次启动创建了配置模板（零实例，指引通过管理路由添加）。 */
   | 'config_template_created'
   /** channel 管理面：配置文件由 v1 自动迁移为 v2 并写回。 */
   | 'config_migrated'

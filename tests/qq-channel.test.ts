@@ -434,8 +434,8 @@ describe('bot.start() 后台化与失败归因（13.1、13.3）', () => {
     expect(h.ingress.states).toContain('blocked')
     const reason = String(h.find('manual_restart_required')[0]?.fields?.reason)
     expect(reason).toContain('GATEWAY_FATAL_CLOSE')
-    // 归因行附处置指引：重跑 enable 拉起新实例，重启仅兜底。
-    expect(reason).toContain('dsh-gateway channel enable qq')
+    // 归因行附处置指引：POST enable 拉起新实例，重启仅兜底。
+    expect(reason).toContain('/channels/qq/enable')
     expect(reason).toContain('fallback')
   })
 })

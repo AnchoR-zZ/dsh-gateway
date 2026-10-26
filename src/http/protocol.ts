@@ -4,14 +4,14 @@ import type { ChannelHealthState } from '../management/contracts.js'
 /**
  * 本机 HTTP 协议层契约：默认监听地址、路由路径、请求 body 上限与网络 DTO。
  *
- * 本文件只含常量与类型，CLI 可以安全导入（不引入 Node HTTP、管理服务或 QQ SDK）。
+ * 本文件只含常量与类型；不引入 Node HTTP、管理服务或 QQ SDK。
  * 业务错误码在 `src/management/contracts.ts`，状态码映射在 `src/http/routes.ts`。
  */
 
 /** 默认只绑定回环地址：探针与管理路由都只服务本机。 */
 export const DEFAULT_GATEWAY_HTTP_HOST = '127.0.0.1'
 
-/** 默认监听端口；与 CLI 默认管理端口一致。 */
+/** 默认监听端口。 */
 export const DEFAULT_GATEWAY_HTTP_PORT = 17_890
 
 /** 只读存活探针路径；监听存在即返回 200。 */

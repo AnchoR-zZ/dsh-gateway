@@ -159,9 +159,9 @@ function adaptRealBot(real: QQBot): QQBotLike {
 
 type ChannelState = 'idle' | 'starting' | 'running' | 'stopping' | 'stopped'
 
-/** manual_restart_required 归因行的处置指引：修因后重跑 enable 拉起新实例，重启进程仅兜底。 */
+/** manual_restart_required 归因行的处置指引：修因后 POST enable 拉起新实例，重启进程仅兜底。 */
 const ENABLE_REMEDY =
-  'rerun "dsh-gateway channel enable qq" after fixing the cause (restarting the gateway is the fallback)'
+  'POST /channels/qq/enable after fixing the cause (restarting the gateway is the fallback)'
 
 export function createQQChannel(options: QQChannelOptions): QQChannel {
   const { appId, appSecret, core, logger, limits } = options

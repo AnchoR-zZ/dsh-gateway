@@ -1,12 +1,12 @@
 # 入站与 QQ 连接
 
-本页描述 QQ 渠道的 SDK 组装、连接生命周期与状态映射、入站纯过滤、被动回复窗口，以及渠道侧拒绝提示的发送归属；实例的按配置拉起、替换重启与管理命令见 [channel 管理](channel-admin.md#channel-manager)，core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示文案、回复规划与投递见 [回复规划与投递](outbound.md#notice-order)，健康判定见 [健康探针与管理路由](../observability.md#readiness)，日志字段见 [日志事件](../observability.md#log-events)。源码：[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts)、[`src/channels/qq/inbound.ts`](../../src/channels/qq/inbound.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
+本页描述 QQ 渠道的 SDK 组装、连接生命周期与状态映射、入站纯过滤、被动回复窗口，以及渠道侧拒绝提示的发送归属；实例的按配置拉起、替换重启与管理路由见 [channel 管理](channel-admin.md#channel-manager)，core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示文案、回复规划与投递见 [回复规划与投递](outbound.md#notice-order)，健康判定见 [健康探针与管理路由](../observability.md#readiness)，日志字段见 [日志事件](../observability.md#log-events)。源码：[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts)、[`src/channels/qq/inbound.ts`](../../src/channels/qq/inbound.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
 
 <a id="qq-connection"></a>
 
 ## QQ 连接与生命周期
 
-渠道实例由 runtime 启动链经实例管理器按配置构造（每个 `enabled` 实例一份，`accountId = appId`），并在 core 进入 `ready` 后调用 `qq.start()` 注册与连接；单个实例启动失败只记 `manual_restart_required` 并置 `blocked`，不影响其他实例与 core，恢复方式是重跑 `dsh-gateway channel enable qq`（替换为新实例）或重启进程。启动顺序与实例停止闸门见 [宿主接入](../architecture.md#host-integration) 与 [实例管理器](channel-admin.md#channel-manager)。
+渠道实例由 runtime 启动链经实例管理器按配置构造（每个 `enabled` 实例一份，`accountId = appId`），并在 core 进入 `ready` 后调用 `qq.start()` 注册与连接；单个实例启动失败只记 `manual_restart_required` 并置 `blocked`，不影响其他实例与 core，恢复方式是调用 `POST /channels/qq/enable`（替换为新实例）或重启进程。启动顺序与实例停止闸门见 [宿主接入](../architecture.md#host-integration) 与 [实例管理器](channel-admin.md#channel-manager)。
 
 `start()` 首次调用按下列顺序装配；同一实例之后再次调用 `start()` 直接返回，无论前一次是成功、进行中还是失败终局，重启必须使用新实例。
 
@@ -54,7 +54,7 @@ SDK 事件与终止条件的映射如下；渠道只上报状态，不自行重�
 
 出站隔离生效后，`ready`、`resumed`、`error` 与 `disconnected` 都不再改变状态，`blocked` 保持不变；隔离语义见 [出站隔离](outbound.md#outbound-isolation)。
 
-`blocked` 的判定权在渠道：永久断连、`bot.start()` 失败与出站隔离记录 `manual_restart_required` 后上报该状态；这些异步失败由渠道消化，不会让 `qq.start()` 拒绝，注册失败则会使 `qq.start()` 拒绝并由实例管理器记录（只影响该实例）。core 收到 `blocked` 后同样记录该事件并保持 readiness 不可用，完整触发点与字段见 [日志事件](../observability.md#log-events)。恢复方式是重跑 `dsh-gateway channel enable qq`（替换为新实例）或重启进程，渠道实例自身不自动重建连接（SDK 内部重连除外）。
+`blocked` 的判定权在渠道：永久断连、`bot.start()` 失败与出站隔离记录 `manual_restart_required` 后上报该状态；这些异步失败由渠道消化，不会让 `qq.start()` 拒绝，注册失败则会使 `qq.start()` 拒绝并由实例管理器记录（只影响该实例）。core 收到 `blocked` 后同样记录该事件并保持 readiness 不可用，完整触发点与字段见 [日志事件](../observability.md#log-events)。恢复方式是调用 `POST /channels/qq/enable`（替换为新实例）或重启进程，渠道实例自身不自动重建连接（SDK 内部重连除外）。
 
 <a id="inbound-filter"></a>
 

@@ -7,9 +7,6 @@
   "packageManager": "pnpm@12.11.2",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "dsh-gateway": "./dist/cli.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

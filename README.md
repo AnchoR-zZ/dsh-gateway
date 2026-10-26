@@ -16,7 +16,7 @@
 
 - [架构地图](docs/architecture.md)：运行组合、宿主接入、职责边界、消息流与扩展入口
 - [入站与 QQ 连接](docs/subsystems/inbound.md)：连接生命周期、渠道状态映射、入站过滤与回复窗口
-- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理服务与 HTTP 路由、错误码、CLI、凭证校验
+- [channel 管理](docs/subsystems/channel-admin.md)：实例管理器、管理服务与 HTTP 路由、错误码、凭证校验
 - [调度与 turn 控制](docs/subsystems/scheduling.md)：准入、排队、执行槽、turn 结果与超时
 - [会话与持久状态](docs/subsystems/session-state.md)：身份键、映射文件、写事务、会话准备与回收
 - [回复规划与投递](docs/subsystems/outbound.md)：切分与预算、提示顺序、投递状态与出站隔离
@@ -43,26 +43,34 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 | `pnpm typecheck` | `tsc --noEmit` | 类型检查通过，不生成 JavaScript |
 | `pnpm lint` | `oxlint src tests scripts tsdown.config.ts vitest.config.ts` | 无未解决的检查错误 |
 | `pnpm test` | `vitest run` | `tests/**/*.test.ts` 全部通过；以命令输出为准 |
-| `pnpm build` | `tsdown` 双入口构建 | 生成 `dist/index.js`、`dist/index.d.ts`、`dist/cli.js` 与 `dist/cli.d.ts`（入口共享的 `protocol-*.js` 分块一并产出） |
+| `pnpm build` | `tsdown` 构建插件入口 | 生成 `dist/index.js` 与 `dist/index.d.ts` |
 | `pnpm dev` | `tsdown --watch` | 源码变化后重新构建；不启动 dsh |
 
 普通测试使用替身隔离真实 dsh 宿主、QQ 网络和模型，不要求 QQ 或模型凭证，也不需要先构建 `dist/`。测试会绑定回环随机端口并写入系统临时目录；`tests/qq-channel.test.ts` 加载真实 QQ SDK 模块，但不建立连接。真实 QQ WebSocket、token 校验端点、模型认证与回复、dsh profile 加载、固定 `17890` 端口和终端 Ctrl+C 路径不在自动测试覆盖内。
 
 提交或联调前依次完成 typecheck、lint、test 和 build，任一步失败先修复再继续。
 
-<a id="channel-admin-cli"></a>
+<a id="channel-admin-api"></a>
 
-## channel 管理 CLI
+## channel 管理路由
 
-`dsh-gateway` 是随本包发布的 CLI（`package.json` 的 `bin`，等价于 `node dist/cli.js ...`），用于在网关运行时添加与启用 QQ 机器人实例，不需要重启进程。它是运行中网关本机管理路由的瘦客户端：网关未运行时报错并提示先启动，不做离线写配置。
+网关进程内自带两条仅本机、无鉴权的 POST 管理路由（默认 `http://127.0.0.1:17890`），用于在网关运行时添加与启用 QQ 机器人实例，不需要重启进程；网关未运行时只能修改配置文件后重启。
 
-| 命令 | 作用 | 成功表现 |
+| 路由 | 请求 body | 作用 |
 |---|---|---|
-| `dsh-gateway channel add qq` | 添加/更新一个 QQ 实例：缺省交互输入 App ID 与 App Secret（secret 不回显），由网关在线校验凭证后保存并启动；`--app-id`/`--app-secret` 供脚本场景，`--force` 跳过校验 | 输出 `ok: qq:<appId> is <state>`，退出码 0；`--force` 下启动失败输出 blocked 错误（凭证已保留）并以非零码退出 |
-| `dsh-gateway channel enable qq` | 置配置 `enabled: true` 并对未在线实例立即启动（`manual_restart_required` 的重试入口）；省略 `--app-id` 时仅当恰好一个实例合法 | 同上 |
-| `dsh-gateway channel add weixin` | 微信渠道留位 | 直接输出暂未支持，退出码 1 |
+| `POST /channels/qq` | `{"appId","appSecret","force"?}` | 添加/更新实例：在线校验凭证（`force: true` 跳过）、保存配置并启动实例 |
+| `POST /channels/qq/enable` | `{"appId"?}` | 置 `enabled: true` 并拉起未在线实例（`manual_restart_required` 的重试入口）；省略 `appId` 时仅当配置中恰好一个实例合法 |
 
-`--port <n>`（或 `--port=<n>`）覆盖默认端口 17890；值参数均支持 `--flag=value` 形式。完整契约（错误码、重复 add、漂移拒绝）见 [channel 管理](docs/subsystems/channel-admin.md)。
+```bash
+curl -X POST http://127.0.0.1:17890/channels/qq \
+  -H 'content-type: application/json' \
+  -d '{"appId":"<AppID>","appSecret":"<AppSecret>"}'
+# {"ok":true,"channel":"qq:<AppID>","state":"online"}
+```
+
+成功响应固定为 `{"ok":true,"channel":"qq:<appId>","state":...}`；启动失败时 `state` 为 `blocked` 并附 `detail`（凭证已保存）。失败响应为 `{"error":{"code","message"}}` 加对应 HTTP 状态码；完整契约（错误码、重复 add、漂移拒绝、停机窗口）见 [channel 管理](docs/subsystems/channel-admin.md#admin-routes)。
+
+Windows PowerShell 中 `curl` 是 `Invoke-WebRequest` 的别名，需写 `curl.exe` 或改用 `Invoke-RestMethod`。`appSecret` 会进入 shell 历史与本机进程参数，脚本场景应从环境变量或文件读取；管理响应、日志与错误信息都不回显 `appSecret`。
 
 <a id="local-dev"></a>
 
@@ -72,9 +80,9 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 
 | 命令 | 作用 | 成功判据 |
 |---|---|---|
-| `pnpm dev:gateway` | 构建插件并启动 `dsh --profile gateway` | 构建输出后 dsh 持续运行；`127.0.0.1:17890/livez` 返回 200，零实例时 `/readyz` 200 且 `channels` 含 `"qq": "not_configured"`；`node dist/cli.js channel add qq` 添加实例后 `/readyz` 显示 `qq:<AppID>: online` |
+| `pnpm dev:gateway` | 构建插件并启动 `dsh --profile gateway` | 构建输出后 dsh 持续运行；`127.0.0.1:17890/livez` 返回 200，零实例时 `/readyz` 200 且 `channels` 含 `"qq": "not_configured"`；用 [channel 管理路由](#channel-admin-api) 添加实例后 `/readyz` 显示 `qq:<AppID>: online` |
 
-先决条件：已完成依赖安装；`dsh` 命令在 `PATH` 上（宿主版本自选，本包不设兼容约束）；`tmp/local-test/dsh-home` 下已初始化 `gateway` profile（首次执行 `dsh plugin --profile gateway add <repo>`）。QQ 凭证经 `node dist/cli.js channel add qq` 写入 `tmp/local-test/gateway-workspace/gateway.config.json`，无凭证也可先启动（零实例）。模型 API key 可由调用者环境或 `tmp/local-test/dsh-home/.env` 提供；该 `.env` 不得包含 `DSH_*` 变量。
+先决条件：已完成依赖安装；`dsh` 命令在 `PATH` 上（宿主版本自选，本包不设兼容约束）；`tmp/local-test/dsh-home` 下已初始化 `gateway` profile（首次执行 `dsh plugin --profile gateway add <repo>`）。QQ 凭证经 [channel 管理路由](#channel-admin-api) 写入 `tmp/local-test/gateway-workspace/gateway.config.json`（也可直接编辑该文件后重启），无凭证也可先启动（零实例）。模型 API key 可由调用者环境或 `tmp/local-test/dsh-home/.env` 提供；该 `.env` 不得包含 `DSH_*` 变量。
 
 开发数据根固定为 `tmp/local-test`（已被 git 忽略），启动器不提供覆盖方式：`dsh-home/` 作为 `DSH_HOME`，`gateway-workspace/` 作为 `DSH_GATEWAY_WORKSPACE`。启动器固定设置 `DSH_TELEMETRY_DISABLED=1`，`dsh` 直接取自 `PATH`；启动器不通过环境变量或配置文件选择它，命令缺失时由启动过程报错。Windows 上构建和 `dsh` 启动都经 shell 执行；启动器吞掉第一次 Ctrl+C，等待 dsh 自行退出，第二次 Ctrl+C 才直接结束启动器。
 
@@ -116,7 +124,7 @@ Node.js 24 及以上，依赖用 pnpm 管理，`packageManager` 固定 `pnpm@12.
 }
 ```
 
-`channels.qq` 是实例数组（`enabled` 缺省为 `true`），可为空；字段校验、v1 自动迁移、热生效范围与单写者/漂移拒绝规则见 [配置契约](docs/config.md#config-fields)，本页不复述完整表。首次启动时若文件不存在，网关会创建含空 `channels.qq` 的 v2 模板并以零实例正常运行（不再失败退出），日志记 `config_template_created` 指引使用 `dsh-gateway channel add qq` 添加机器人；已有文件绝不覆盖或自动修复，未知字段、`null`、类型错误和无效值一律拒绝启动。
+`channels.qq` 是实例数组（`enabled` 缺省为 `true`），可为空；字段校验、v1 自动迁移、热生效范围与单写者/漂移拒绝规则见 [配置契约](docs/config.md#config-fields)，本页不复述完整表。首次启动时若文件不存在，网关会创建含空 `channels.qq` 的 v2 模板并以零实例正常运行（不再失败退出），日志记 `config_template_created` 指引通过 [channel 管理路由](#channel-admin-api) 添加机器人；已有文件绝不覆盖或自动修复，未知字段、`null`、类型错误和无效值一律拒绝启动。
 
 配置文件包含明文 QQ AppSecret，当前不做文件权限检查或加密。部署方应把 workspace 放在仓库外（默认值已满足），并通过文件系统 ACL 限制为服务账号与管理员可读；`gateway.config.json` 已加入 `.gitignore`，不得提交。
 
@@ -146,7 +154,7 @@ DSH_TELEMETRY_DISABLED=1
 DSH_GATEWAY_WORKSPACE=D:/dsh-gateway/data/gateway
 ```
 
-QQ 的 AppID/AppSecret 不写入 `.env`，而是通过 `dsh-gateway channel add qq` 写入 `<workspace>/gateway.config.json`（或手工编辑后重启）。首次正式启动时若该文件不存在，网关会创建 v2 模板并以零实例正常启动，随后用 CLI 添加机器人即可，无需重启；若沿用旧版 v1 配置文件，启动时会自动迁移为 v2 并写回，旧版首启生成的双空凭证模板同样迁移为 v2 零实例并正常启动（见 [v1 迁移](docs/config.md#v1-migration)）。以 Windows PowerShell 为例，全局安装 dsh 后直接调用它的 Node 入口，以便用 `--env-file` 注入外部 `.env`：
+QQ 的 AppID/AppSecret 不写入 `.env`，而是写进 `<workspace>/gateway.config.json`：首次启动前手工编辑（之后重启生效），或在网关启动后调用 [channel 管理路由](#channel-admin-api) 热添加。首次正式启动时若该文件不存在，网关会创建 v2 模板并以零实例正常启动，随后在线添加机器人即可，无需重启；若沿用旧版 v1 配置文件，启动时会自动迁移为 v2 并写回，旧版首启生成的双空凭证模板同样迁移为 v2 零实例并正常启动（见 [v1 迁移](docs/config.md#v1-migration)）。以 Windows PowerShell 为例，全局安装 dsh 后直接调用它的 Node 入口，以便用 `--env-file` 注入外部 `.env`：
 
 ```powershell
 npm install --global @deepseek-ai/dsh  # 版本自选，示例与开发基线基于 0.2.1-rc 系列
@@ -187,7 +195,7 @@ secrets/.env                       # dsh 变量与可选 workspace 路径，不�
 
 ### 停止与重启
 
-正常停止在运行终端按 Ctrl+C 并等待原进程结束；停止期间在 HTTP 监听关闭前本机探针仍可访问，新的管理写入按 503 `gateway_stopping` 拒绝（已保存的配置保留、等下次启动生效），监听最后关闭（见[健康探针与管理路由](docs/observability.md#readiness)）。修改非 channel 配置（limits、`debug` 等）或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。channel 实例的添加、启用与凭证变更不需要重启：日志或 `/readyz` 出现 `blocked` 等需要人工介入的状态时，先按 `manual_restart_required` 的 `reason` 修复原因（例如更正凭证），再重跑 `dsh-gateway channel enable qq` 拉起新实例；该命令失败时重启进程仍是兜底路径。触发点、failed 吸收态与处置边界见[健康与日志](docs/observability.md#state-machines)。
+正常停止在运行终端按 Ctrl+C 并等待原进程结束；停止期间在 HTTP 监听关闭前本机探针仍可访问，新的管理写入按 503 `gateway_stopping` 拒绝（已保存的配置保留、等下次启动生效），监听最后关闭（见[健康探针与管理路由](docs/observability.md#readiness)）。修改非 channel 配置（limits、`debug` 等）或升级后用相同 `.env`、`DSH_HOME` 与 workspace 手动重新启动。channel 实例的添加、启用与凭证变更不需要重启：日志或 `/readyz` 出现 `blocked` 等需要人工介入的状态时，先按 `manual_restart_required` 的 `reason` 修复原因（例如更正凭证），再调用 `POST /channels/qq/enable` 拉起新实例；调用失败时重启进程仍是兜底路径。触发点、failed 吸收态与处置边界见[健康与日志](docs/observability.md#state-machines)。
 
 配置文件在启动后被外部修改时，管理路由拒绝写入（409 `config_modified_externally`），不静默覆盖；处置方式是重启 dsh 或把文件改回后重试。手工编辑配置（含移除实例）后重启 dsh 是合法的冷路径。
 
@@ -215,7 +223,7 @@ Get-Content -LiteralPath '<workspace>/state/bindings.json' -Encoding utf8 -Raw |
 
 - 不设用户白名单。任何能向机器人发私聊的用户都能驱动本机 agent；机器人被公开或分享前应视为不可信入口。
 - 插件与 dsh 同进程，拥有 dsh 进程权限。插件或渠道异常可能影响 dsh，不能单独重启 gateway；插件崩溃后需要重新启动 dsh。单个 QQ 实例的启动失败不再影响进程与其他实例。
-- channel 管理路由仅绑定回环地址、本期无鉴权：同机任意本地进程都可添加或启用实例。`appSecret` 只写不读——管理响应、CLI 输出、日志与错误信息一律不回显。
+- channel 管理路由仅绑定回环地址、本期无鉴权：同机任意本地进程都可添加或启用实例。`appSecret` 只写不读——管理响应、日志与错误信息一律不回显；调用方仍需避免它进入 shell 历史与本机进程参数。
 - 队列、运行中的 handle、出站计划和发送计数都在内存中。进程崩溃会丢失未处理消息和未发送回复，不重放、不补发。
 - 没有 exactly-once 或端到端 at-least-once 保证。SDK 默认去重窗口之外的重复推送可能再次执行；QQ 发送结果未知时不会重试，可能丢回复或出现迟到回复。
 - 映射持久化失败会使 core 进入 failed 并停止准入；dispose 未收敛、出站隔离或停机预算耗尽需要人工介入（重跑 enable 或重启）。

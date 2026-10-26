@@ -1,6 +1,6 @@
 # 配置与固定常量
 
-本页描述网关的运行配置：`<workspace>/gateway.config.json` 的 v2 字段、校验与默认值，v1 的自动迁移，热生效范围与写冲突规则，workspace 的解析与派生路径，以及 `GATEWAY_LIMITS` 固定行为常量；映射文件格式见 [映射文件](subsystems/session-state.md#bindings-file)，健康与日志见 [健康探针](observability.md#readiness) 与 [日志事件](observability.md#log-events)，channel 管理命令见 [README](../README.md) 与 [channel 管理](subsystems/channel-admin.md)，部署命令见 [README](../README.md)。源码：[`src/config/schema.ts`](../src/config/schema.ts)、[`src/config/store.ts`](../src/config/store.ts) 与 [`src/contracts.ts`](../src/contracts.ts)。
+本页描述网关的运行配置：`<workspace>/gateway.config.json` 的 v2 字段、校验与默认值，v1 的自动迁移，热生效范围与写冲突规则，workspace 的解析与派生路径，以及 `GATEWAY_LIMITS` 固定行为常量；映射文件格式见 [映射文件](subsystems/session-state.md#bindings-file)，健康与日志见 [健康探针](observability.md#readiness) 与 [日志事件](observability.md#log-events)，channel 管理路由见 [channel 管理](subsystems/channel-admin.md) 与 [README](../README.md#channel-admin-api)，部署命令见 [README](../README.md)。源码：[`src/config/schema.ts`](../src/config/schema.ts)、[`src/config/store.ts`](../src/config/store.ts) 与 [`src/contracts.ts`](../src/contracts.ts)。
 
 <a id="config-fields"></a>
 
@@ -31,7 +31,7 @@
 
 | 实例字段 | 必需 / 默认 | 校验与运行时语义 |
 |---|---|---|
-| `appId` | 必需 | `trim` 后非空字符串且 ≤128 字符、仅含 `[A-Za-z0-9-]`（bindingId 前缀段约束，含 `_` 等字符直接拒绝）；QQ 渠道的 accountId，也是健康表与管理命令的实例标识 |
+| `appId` | 必需 | `trim` 后非空字符串且 ≤128 字符、仅含 `[A-Za-z0-9-]`（bindingId 前缀段约束，含 `_` 等字符直接拒绝）；QQ 渠道的 accountId，也是健康表与管理路由的实例标识 |
 | `appSecret` | 必需 | `trim` 后非空字符串且 ≤256 字符；错误消息与日志不含其值 |
 | `enabled` | 可选，默认 `true` | 布尔值；`false` 的实例不启动，健康表显示 `disabled`，不影响就绪判定 |
 
@@ -43,7 +43,7 @@
 
 读入时 `appId` 与 `appSecret` 会 `trim`，`enabled` 缺省取 `true`；校验通过的文件对象被冻结；运行期配置只含派生路径与文件字段（含 `qqInstances` 实例清单），不含 dsh home。
 
-配置文件不存在时，网关先递归创建 workspace 目录，再以 `wx` 独占方式写入 v2 模板：`schemaVersion` 为 `2`、`channels.qq` 为空数组、其余字段为默认值，2 空格缩进、结尾换行、不含 BOM。模板可直接加载，进程以零渠道实例正常启动（`/readyz` 200、`channels` 含 `"qq": "not_configured"`），日志记一条 `config_template_created` 指引使用 `dsh-gateway channel add qq`；并发启动时另一方已创建会得到 `EEXIST`，本次按已存在文件继续读取且不计为创建者。
+配置文件不存在时，网关先递归创建 workspace 目录，再以 `wx` 独占方式写入 v2 模板：`schemaVersion` 为 `2`、`channels.qq` 为空数组、其余字段为默认值，2 空格缩进、结尾换行、不含 BOM。模板可直接加载，进程以零渠道实例正常启动（`/readyz` 200、`channels` 含 `"qq": "not_configured"`），日志记一条 `config_template_created` 指引通过管理路由添加机器人；并发启动时另一方已创建会得到 `EEXIST`，本次按已存在文件继续读取且不计为创建者。
 
 已有文件绝不覆盖或自动修复：损坏的 JSON、未知字段、无效实例在校验失败后保持原字节不变（v1 迁移是唯一例外，见下节）。读取只剥离文件开头的 UTF-8 BOM（Windows 编辑器常见），字符串字面量之外出现 BOM 仍是非法 JSON；workspace 目录与本次新建的模板在校验失败后保留。
 

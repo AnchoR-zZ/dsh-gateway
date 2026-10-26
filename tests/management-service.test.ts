@@ -349,7 +349,7 @@ describe('management service: addQQ', () => {
     expect(readConfigOnDisk(h.configPath).channels.qq).toEqual([])
   })
 
-  it('rejects credential_validation_failed with a --force hint on network failures', async () => {
+  it('rejects credential_validation_failed with a force hint on network failures', async () => {
     const h = makeHarness([], {
       validateImpl: async () => {
         throw new QQCredentialCheckError('network', 'QQ token endpoint timed out after 10000ms')
@@ -360,7 +360,7 @@ describe('management service: addQQ', () => {
 
     expect(error.code).toBe('credential_validation_failed')
     expect(error.message).toContain('QQ token endpoint timed out after 10000ms')
-    expect(error.message).toContain('--force')
+    expect(error.message).toContain('"force": true')
   })
 
   it('wraps unexpected validator errors as credential_validation_failed with a redacted message', async () => {

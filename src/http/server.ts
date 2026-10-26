@@ -13,7 +13,7 @@ import type { HttpReply } from './protocol.js'
 /**
  * 本机 HTTP server：只做传输层——监听、body 读取与限制、JSON 解析、响应发送与连接关闭。
  *
- * 路由与业务错误映射在 `src/http/routes.ts`；本模块不认识管理命令、配置或 QQ。默认只绑定
+ * 路由与业务错误映射在 `src/http/routes.ts`；本模块不认识管理请求、配置或 QQ。默认只绑定
  * 回环地址（`127.0.0.1:17890`，同时承担单实例占位）：绑定失败由 `start()` 原样 reject，
  * 不尝试杀死其他进程；listening 后 unref，使超预算未关闭的 server 不阻塞进程退出。
  *

@@ -923,13 +923,13 @@ describe('core assembly', () => {
     ])
   })
 
-  it('setState blocked 记 manual_restart_required，reason 指引重跑 channel enable（重启兜底）', async () => {
+  it('setState blocked 记 manual_restart_required，reason 指引 POST /channels/qq/enable（重启兜底）', async () => {
     const h = await makeHarness()
     await h.handle.lifecycle.start()
     const ingress = h.handle.ingress.registerChannel(new FakeChannel('qq', 'app-1'))
     ingress.setState('blocked')
     const line = h.logs.find((l) => l.event === 'manual_restart_required')
-    expect(String(line?.reason)).toContain('dsh-gateway channel enable qq')
+    expect(String(line?.reason)).toContain('/channels/qq/enable')
     expect(String(line?.reason)).toContain('fallback')
   })
 })

@@ -7,7 +7,7 @@ import { redact } from '../../logging.js'
  * （`@tencent-connect/qqbot-nodejs` 的 token api）。
  *
  * 错误分两类：`rejected`（平台明确拒绝：非 200、响应缺 token、响应不可解析）与
- * `network`（不可达/超时/中断）；调用方据此决定是否允许 `--force` 跳过。错误消息不含
+ * `network`（不可达/超时/中断）；调用方据此决定是否允许请求体 `force: true` 跳过。错误消息不含
  * appSecret，上游错误正文片段经 `redact` 后截断附加。
  */
 

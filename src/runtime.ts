@@ -89,7 +89,7 @@ export function launchGateway(
 
   if (configStore.createdTemplate) {
     logger.logEvent('config_template_created', {
-      reason: `created a template at ${configStore.configPath}; run "dsh-gateway channel add qq" to add a bot`,
+      reason: `created a template at ${configStore.configPath}; add a bot via POST /channels/qq or by editing channels.qq and restarting`,
     })
   }
   if (configStore.migratedFromV1) {

@@ -1,12 +1,12 @@
 # channel 管理
 
-本页描述 QQ 渠道实例的运行时管理：实例管理器（冷启动、失败隔离、替换重启与停机闸门）、管理服务（add/enable 业务流程、`ManagementError` 与停机检查点）、本机管理路由与 HTTP 传输契约、CLI 的命令行为，以及 QQ 凭证在线校验；配置 schema 与热生效范围见 [配置文件](../config.md#config-fields) 与 [热生效范围与写冲突](../config.md#hot-reload-scope)，本机 HTTP 监听与探针判定见 [健康探针](../observability.md#readiness)，安装与运维步骤见 [README](../../README.md)。源码：[`src/management/service.ts`](../../src/management/service.ts)、[`src/management/status.ts`](../../src/management/status.ts)、[`src/management/contracts.ts`](../../src/management/contracts.ts)、[`src/http/server.ts`](../../src/http/server.ts)、[`src/http/routes.ts`](../../src/http/routes.ts)、[`src/channels/manager.ts`](../../src/channels/manager.ts)、[`src/channels/qq/token.ts`](../../src/channels/qq/token.ts)、[`src/cli.ts`](../../src/cli.ts) 与 [`src/runtime.ts`](../../src/runtime.ts)。
+本页描述 QQ 渠道实例的运行时管理：实例管理器（冷启动、失败隔离、替换重启与停机闸门）、管理服务（add/enable 业务流程、`ManagementError` 与停机检查点）、本机管理路由与 HTTP 传输契约，以及 QQ 凭证在线校验；配置 schema 与热生效范围见 [配置文件](../config.md#config-fields) 与 [热生效范围与写冲突](../config.md#hot-reload-scope)，本机 HTTP 监听与探针判定见 [健康探针](../observability.md#readiness)，安装与运维步骤见 [README](../../README.md)。源码：[`src/management/service.ts`](../../src/management/service.ts)、[`src/management/status.ts`](../../src/management/status.ts)、[`src/management/contracts.ts`](../../src/management/contracts.ts)、[`src/http/server.ts`](../../src/http/server.ts)、[`src/http/routes.ts`](../../src/http/routes.ts)、[`src/channels/manager.ts`](../../src/channels/manager.ts)、[`src/channels/qq/token.ts`](../../src/channels/qq/token.ts) 与 [`src/runtime.ts`](../../src/runtime.ts)。
 
 <a id="channel-manager"></a>
 
 ## 实例管理器
 
-`createChannelManager` 维护两张表：配置实例清单（最近一次保存后的 `channels.qq` 视图，冷启动取自启动加载）与运行中的渠道实例（`appId` → channel 适配器）。启动链由 runtime 在 core 就绪后按启动配置顺序对每个 `enabled` 实例调用 `startInstance`（已在线的实例幂等跳过，不停旧起新——如循环等待期间管理命令已拉起该实例）；单个实例启动失败只影响该实例，其他实例与 core 继续运行，进程不退出。
+`createChannelManager` 维护两张表：配置实例清单（最近一次保存后的 `channels.qq` 视图，冷启动取自启动加载）与运行中的渠道实例（`appId` → channel 适配器）。启动链由 runtime 在 core 就绪后按启动配置顺序对每个 `enabled` 实例调用 `startInstance`（已在线的实例幂等跳过，不停旧起新——如循环等待期间管理请求已拉起该实例）；单个实例启动失败只影响该实例，其他实例与 core 继续运行，进程不退出。
 
 实例工厂构造失败或 `channel.start()` 直接抛错时，管理器记录 `manual_restart_required`，尝试停止已创建实例以清理可能已完成的 core 注册，并从运行表移除该实例；配置中已启用但未注册的实例由健康表显示为 `blocked`。QQ 渠道在启动 SDK 前先注册到 core；SDK 的后台启动 Promise 拒绝时，渠道记录 `manual_restart_required` 并将已注册实例置为 `blocked`，保留 core 注册与运行表条目，后续通过替换实例重试。连接失败语义与就绪判定分别见 [QQ 连接与生命周期](inbound.md#qq-connection)和[健康探针](../observability.md#readiness)。
 
@@ -34,7 +34,7 @@
 
 ## 管理路由与 HTTP 分层
 
-管理能力分三层，全部由 runtime 组装：传输层 [`src/http/server.ts`](../../src/http/server.ts) 负责监听、路径去查询串、仅对 `POST` 读取并限制 body、解析 JSON、发送响应与关闭连接，不认识管理命令；路由层 [`src/http/routes.ts`](../../src/http/routes.ts) 负责路径/方法分派、`/livez` 与 `/readyz` 响应，并把 `ManagementError` 映射为 HTTP 状态码；业务层 [`src/management/service.ts`](../../src/management/service.ts) 负责输入校验、core 状态、凭证、持久化与实例生效。未命中路由返回 `undefined`，由传输层统一回 404 `{"error":"not found"}`；路由或业务抛出非 `ManagementError` 的异常由传输层记 `state_warning` 后回 500 `internal_error`。
+管理能力分三层，全部由 runtime 组装：传输层 [`src/http/server.ts`](../../src/http/server.ts) 负责监听、路径去查询串、仅对 `POST` 读取并限制 body、解析 JSON、发送响应与关闭连接，不认识管理业务；路由层 [`src/http/routes.ts`](../../src/http/routes.ts) 负责路径/方法分派、`/livez` 与 `/readyz` 响应，并把 `ManagementError` 映射为 HTTP 状态码；业务层 [`src/management/service.ts`](../../src/management/service.ts) 负责输入校验、core 状态、凭证、持久化与实例生效。未命中路由返回 `undefined`，由传输层统一回 404 `{"error":"not found"}`；路由或业务抛出非 `ManagementError` 的异常由传输层记 `state_warning` 后回 500 `internal_error`。
 
 | 路由 | 请求 body | 行为 | 成功响应 |
 |---|---|---|---|
@@ -43,7 +43,7 @@
 
 传输契约：监听默认只绑定回环地址；管理请求必须是 `POST` 且 `content-type` 含 `application/json`（非 `POST` 或未命中路径按 404；`POST` 但 content-type 非 JSON 按 400 `invalid_request`），body 上限 64 KiB（超限 400 `request body is too large`，读取中断 400 `failed to read request body`，空 body 视为 `{}`，坏 JSON 400 `request body is not valid JSON`）；所有响应 `content-type: application/json`；本期无鉴权。任何响应、日志与错误信息都不回显 `appSecret`。
 
-监听由 runtime 在启动链先绑定、停止链最后关闭；在监听关闭前的停机窗口内，管理写请求得到 503 `gateway_stopping`，探针仍可访问。判定与正文细节见 [健康探针与管理路由](../observability.md#readiness)。
+监听由 runtime 在启动链先绑定、停止链最后关闭；在监听关闭前的停机窗口内，管理写请求得到 503 `gateway_stopping`，探针仍可访问。判定与正文细节见 [健康探针与管理路由](../observability.md#readiness)，调用示例见 [README](../../README.md#channel-admin-api)。
 
 错误码与 HTTP 状态：
 
@@ -54,7 +54,7 @@
 | 400 | `app_id_required` | `enable` 省略 `appId` 且配置实例数不是 1 | 管理服务 |
 | 404 | `instance_not_found` | `enable` 指定的 `appId` 不在配置中 | 管理服务 |
 | 409 | `config_modified_externally` | 写前漂移检测发现配置文件被外部修改 | 管理服务（映射 store 错误） |
-| 422 | `credential_validation_failed` | 凭证校验失败；网络不可达时 message 提示可用 `--force` | 管理服务 |
+| 422 | `credential_validation_failed` | 凭证校验失败；网络不可达时 message 提示可在请求体传 `force: true` | 管理服务 |
 | 503 | `gateway_not_ready` | core 非 `ready`；message 按状态区分：`starting` 提示启动完成后重试，`failed` 提示查 `manual_restart_required` 日志并重启进程，`stopping`/`stopped` 提示正在关机 | 管理服务 |
 | 503 | `gateway_stopping` | 停机闸门已关闭管理写入（入口或检查点） | 管理服务 |
 | 500 | `config_write_failed` | 配置写回失败，message 经 `redact` 脱敏 | 管理服务 |
@@ -66,26 +66,12 @@
 
 ## QQ 凭证在线校验
 
-`createQQTokenValidator` 用一次 `POST https://bots.qq.com/app/getAppAccessToken`（body `{"appId","clientSecret"}`，10 s 超时）校验凭证：HTTP 200 且响应含非空 `access_token` 即有效，不建立 WebSocket。失败分两类：`rejected`（非 200、缺 token、响应不可解析，message 含上游状态码与截断的错误正文）与 `network`（不可达/超时，message 提示重试或 `--force`）；两者都映射 422，错误消息不含 `appSecret`。校验器抛出的其他异常同样映射 422，message 经 `redact` 脱敏后包装。
-
-<a id="cli"></a>
-
-## CLI
-
-`dsh-gateway`（`package.json` bin，产物 `dist/cli.js`，可用 `node dist/cli.js ...` 直接运行）是瘦 HTTP 客户端：参数解析 → 缺参交互输入 → 打管理路由 → 按响应输出，不做业务判断、不做离线写配置，无新增依赖。默认端口与管理路径来自 [`src/http/protocol.ts`](../../src/http/protocol.ts)（`DEFAULT_GATEWAY_HTTP_PORT` 为 17,890，`CHANNEL_ADD_PATH` / `CHANNEL_ENABLE_PATH` 为上述两条路由），`--port` 覆盖；连接被拒等网络错误输出 `start the gateway service first` 并以非零码退出。值参数（`--app-id`、`--app-secret`、`--port`）亦接受 `--flag=value` 形式（如 `--app-secret=xxx`、`--port=17890`），值本身以 `--` 开头时只能用该形式。
-
-| 命令 | 参数 | 行为 |
-|---|---|---|
-| `channel add qq` | `--app-id`、`--app-secret`、`--force`、`--port` | 打 `POST /channels/qq`；缺 `--app-id`/`--app-secret` 时交互输入，secret 提示不回显（`--app-secret` 供脚本场景） |
-| `channel enable qq` | `--app-id`、`--port` | 打 `POST /channels/qq/enable` |
-| `channel add weixin` / `enable weixin` | — | 直接输出 "not supported yet"，退出码 1，不发请求 |
-
-成功输出 `ok: qq:<appId> is <state>`；响应 `state: "blocked"` 视为明确报错（输出含 `detail` 的错误行，退出码 1）；HTTP 错误输出 `error: <message> [<code>]`，停机窗口内的 503 因此显示为带 `gateway_stopping` 的错误并非零退出。
+`createQQTokenValidator` 用一次 `POST https://bots.qq.com/app/getAppAccessToken`（body `{"appId","clientSecret"}`，10 s 超时）校验凭证：HTTP 200 且响应含非空 `access_token` 即有效，不建立 WebSocket。失败分两类：`rejected`（非 200、缺 token、响应不可解析，message 含上游状态码与截断的错误正文）与 `network`（不可达/超时，message 提示重试或在请求体传 `force: true`）；两者都映射 422，错误消息不含 `appSecret`。校验器抛出的其他异常同样映射 422，message 经 `redact` 脱敏后包装。
 
 <a id="known-gaps"></a>
 
 ## 已知缺口
 
 - 管理路由本期无鉴权，仅靠绑定回环地址限制为本机访问；同机的任意本地进程都可调用。
-- CLI 交互输入的 secret 回显抑制依赖终端模式（readline muted output）；非 TTY 管道输入时会回显或无提示缓冲，脚本场景应使用 `--app-secret`。
+- 无内置管理客户端：在线变更需要调用方自行发 HTTP 请求，凭证随请求体传递；也可以手工编辑配置文件后重启。
 - `add` 对已 `disabled` 的实例更新 secret 时仍会启动该实例（配置保留 `enabled: false`），运行态与配置开关不一致，健康表以运行态覆盖；重启后按配置不再启动。

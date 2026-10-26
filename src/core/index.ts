@@ -650,7 +650,7 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
               channelId: channel.channelId,
               generation: ingressGeneration,
               reason:
-                'channel reported blocked; fix the cause, then rerun "dsh-gateway channel enable qq" to start a fresh instance (restarting the gateway is the fallback)',
+                'channel reported blocked; fix the cause, then POST /channels/qq/enable to start a fresh instance (restarting the gateway is the fallback)',
             })
           } else if (state === 'reconnecting') {
             logger.logEvent('channel_reconnecting', {

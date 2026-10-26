@@ -12,7 +12,7 @@
 
 bundle 组合由根目录 [`cordis.patch.yml`](../cordis.patch.yml) 定义：叠加在 `@deepseek-ai/dsh-base` 之上，插入唯一的 `dsh-gateway` 插件行。该禁用清单禁用 goal 系多轮驱动、subagent 与 workflow、遥测与 HMR、HTTP 远程传输、`tool-jobs` / `tool-web` / `tool-skill` / `tool-working-directory` / `session-title-llm` 等非闭环能力，以及 `user-questions` 这个 UI-backed 服务；一次性 shell 不允许后台执行。审批服务保留但策略为 `never`，permission 预设表含 `gateway-unattended`（workspace-write + never），承接该组合。dsh patch 对一行 config 是整值替换，修改须重述该行完整 config；完整清单以 patch 文件为准。
 
-本机 HTTP 监听由 runtime 组装并拥有：监听在 [`src/http/server.ts`](../src/http/server.ts)，路由在 [`src/http/routes.ts`](../src/http/routes.ts)，业务在 [`src/management/service.ts`](../src/management/service.ts)，默认绑定 `127.0.0.1:17890`。`/livez` 恒 200，`/readyz` 返回管理状态投影的就绪判定与正文，另有仅本机、仅 channel 管理的 POST 路由（`dsh-gateway` CLI 的后端）。监听独占回环地址并兼作单实例占位，端口被占（已有实例）时启动失败并记录 `manual_restart_required`，不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。启动链先绑定监听再启动 core，停止链最后关闭监听，因此停止期间探针仍可观察、管理写请求按 503 `gateway_stopping` 拒绝，关闭后连接被拒绝；探针不承担保活职责，也不接受消息或 channel 管理之外的控制请求。判定细节与响应正文见[健康探针与管理路由](observability.md#readiness)。
+本机 HTTP 监听由 runtime 组装并拥有：监听在 [`src/http/server.ts`](../src/http/server.ts)，路由在 [`src/http/routes.ts`](../src/http/routes.ts)，业务在 [`src/management/service.ts`](../src/management/service.ts)，默认绑定 `127.0.0.1:17890`。`/livez` 恒 200，`/readyz` 返回管理状态投影的就绪判定与正文，另有仅本机、仅 channel 管理的 POST 路由（见 [channel 管理](subsystems/channel-admin.md#admin-routes)）。监听独占回环地址并兼作单实例占位，端口被占（已有实例）时启动失败并记录 `manual_restart_required`，不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。启动链先绑定监听再启动 core，停止链最后关闭监听，因此停止期间探针仍可观察、管理写请求按 503 `gateway_stopping` 拒绝，关闭后连接被拒绝；探针不承担保活职责，也不接受消息或 channel 管理之外的控制请求。判定细节与响应正文见[健康探针与管理路由](observability.md#readiness)。
 
 <a id="host-integration"></a>
 
@@ -22,7 +22,7 @@ bundle 组合由根目录 [`cordis.patch.yml`](../cordis.patch.yml) 定义：叠
 
 组装与启停全部在 [`src/runtime.ts`](../src/runtime.ts)：`launchGateway` 在 `apply` 返回前同步完成配置加载与对象组装——从 dsh 根上下文取 `dshHomePath()` 解析 dsh home → 解析 workspace 并加载配置 store（含 v1 迁移与模板创建；失败时记录 `gateway configuration rejected: ...` 后抛错，使插件加载失败）→ 创建日志器并记录配置事件 → 经 [`src/host/dsh.ts`](../src/host/dsh.ts) 创建 AgentHost 与事件源 → 记录启动摘要 → 构造状态 store、turn-runner、会话管理器、core、实例管理器、状态投影、管理服务、路由与 HTTP server → 用 `ctx.effect` 注册后台启动与幂等 disposer。
 
-启动顺序固定为 HTTP 监听 → core → 渠道实例：先 `http.start()` 绑定回环端口（端口占用即单实例保护，失败则 core 不启动），再 `core.lifecycle.start()` 加载状态映射、启动会话回收器并进入 `ready`，最后按启动配置顺序冷启动 `enabled` 实例。冷启动循环每轮读取实例管理器最新视图，跳过 `disabled` 与已 `online` 的实例（等待期间管理命令可能已更新 secret 或拉起该实例）；单个实例启动失败只记日志并使其在就绪表中回落 `blocked`，循环继续，零实例时 core 照常就绪。启动任一步失败时记录 `manual_restart_required`（`gateway startup failed: ...`），依次尽力停止 core、停止全部实例并关闭 HTTP（各步失败另记 `state_warning`），不把异常抛回 `apply`，进程不退出但就绪不可用。
+启动顺序固定为 HTTP 监听 → core → 渠道实例：先 `http.start()` 绑定回环端口（端口占用即单实例保护，失败则 core 不启动），再 `core.lifecycle.start()` 加载状态映射、启动会话回收器并进入 `ready`，最后按启动配置顺序冷启动 `enabled` 实例。冷启动循环每轮读取实例管理器最新视图，跳过 `disabled` 与已 `online` 的实例（等待期间管理请求可能已更新 secret 或拉起该实例）；单个实例启动失败只记日志并使其在就绪表中回落 `blocked`，循环继续，零实例时 core 照常就绪。启动任一步失败时记录 `manual_restart_required`（`gateway startup failed: ...`），依次尽力停止 core、停止全部实例并关闭 HTTP（各步失败另记 `state_warning`），不把异常抛回 `apply`，进程不退出但就绪不可用。
 
 dsh ctx 到核心端口的适配集中在 [`src/host/dsh.ts`](../src/host/dsh.ts)，它是 `src` 内唯一导入 `@deepseek-ai/dsh-*` 运行时值的模块；插件入口只保留类型导入与 `@deepseek-ai/schemastery` 的 `z`。启动摘要读取一次 `ctx.agentDefaultModel.currentSelection()`，会话管理器在构造时另读一次，全部新建与恢复 agent 共用会话管理器持有的同一份模型选择，修改模型需要重启；`createAgent` / `resumeAgent` 在 setup 阶段对 session 调用 `setApprovalPolicy('never')` 与 `setSandboxMode('workspace-write')`，恢复路径同样强制；`flushSession` 对同一 session 的并发调用复用同一个 in-flight Promise；`eventsFor` 把 dsh 的 `agent/inbox/claimed` 与 `session/event` 翻译为 turn-runner 消费的事件，订阅必须先于 `followup` 并按 session id 过滤；session 事件只投影 `assistant/message`、`tool/result` 与 `turn/end` 的必要字段，其他事件归入 `other`，不参与最终文本选择。事件消费与终态判定见[turn 执行](subsystems/scheduling.md#turn-runner)。
 
@@ -41,13 +41,12 @@ cordis disposer 触发停止时，runtime 协调整个进程的停止顺序：`m
 
 渠道适配器通过核心提交输入并接收最终结果，不直接控制 agent 会话。网关通过插件入口委托 [`src/host/dsh.ts`](../src/host/dsh.ts) 的宿主适配层使用 dsh 公共插件 API；core 只依赖 AgentHost 端口，不依赖某一聊天平台的 SDK。
 
-包内按模块划分职责（`src/runtime.ts` 是唯一总装与启停协调者，`src/index.ts` 只是 cordis 插件入口，`src/cli.ts` 是独立 bin 入口）：
+包内按模块划分职责（`src/runtime.ts` 是唯一总装与启停协调者，`src/index.ts` 只是 cordis 插件入口）：
 
 | 模块 | 职责 |
 |---|---|
 | [`src/index.ts`](../src/index.ts) | 唯一 cordis 插件入口：声明 `name`/`inject`/`Config`，`apply` 只把 `ctx` 与 `process.env` 交给 runtime；不组装业务 |
 | [`src/runtime.ts`](../src/runtime.ts) | 进程内唯一总装与生命周期协调者：配置加载、host/core/实例管理器/管理服务/路由/HTTP 组装、启动顺序、失败回滚与停机顺序 |
-| [`src/cli.ts`](../src/cli.ts) | `dsh-gateway` bin：channel 子命令的参数解析、交互输入与本机管理路由的瘦 HTTP 客户端 |
 | [`src/contracts.ts`](../src/contracts.ts) | core 与渠道间的共享 DTO、接口、身份键与固定行为常量 `GATEWAY_LIMITS`，无运行时模块依赖 |
 | [`src/logging.ts`](../src/logging.ts) | 单行 JSON 结构化日志：事件名与字段类型、`error`/`reason` 脱敏、正文日志开关 |
 | [`src/host/dsh.ts`](../src/host/dsh.ts) | dsh 宿主适配：dsh ctx → AgentHost 端口、session 事件 → turn 事件源、dsh home 解析；`src` 内唯一导入 `@deepseek-ai/dsh-*` 运行时值的模块 |
@@ -60,11 +59,11 @@ cordis disposer 触发停止时，runtime 协调整个进程的停止顺序：`m
 | [`src/core/session-manager.ts`](../src/core/session-manager.ts) | 会话新建、恢复与重建，handle 所有权，LRU 缓存与有界释放 |
 | [`src/core/turn-runner.ts`](../src/core/turn-runner.ts) | 单次 followup 的执行：事件观察、最终文本选择、终态门、取消与 flush |
 | [`src/core/lifecycle.ts`](../src/core/lifecycle.ts) | core 状态机与幂等停止协调器；不含 HTTP 监听或路由 |
-| [`src/management/contracts.ts`](../src/management/contracts.ts) | 管理命令/查询结果与稳定错误码；不含 HTTP 状态码 |
+| [`src/management/contracts.ts`](../src/management/contracts.ts) | 管理请求/查询结果与稳定错误码；不含 HTTP 状态码 |
 | [`src/management/service.ts`](../src/management/service.ts) | 管理业务：add/enable 校验、core 就绪检查、凭证校验、配置保存、实例生效与停机闸门 |
 | [`src/management/status.ts`](../src/management/status.ts) | 配置与 core 快照聚合、`ready` 判定与脱敏 DTO；`getStatus()` 与 `/readyz` 共用同一份计算 |
-| [`src/http/protocol.ts`](../src/http/protocol.ts) | HTTP 常量（默认地址与端口、路径、body 上限）与网络 DTO；CLI 可安全导入 |
-| [`src/http/server.ts`](../src/http/server.ts) | 本机 HTTP 传输层：监听、body 限制与 JSON 解析、响应发送、连接关闭与运行期错误；不识别管理命令 |
+| [`src/http/protocol.ts`](../src/http/protocol.ts) | HTTP 常量（默认地址与端口、路径、body 上限）与网络 DTO；不引入 Node HTTP 与管理服务 |
+| [`src/http/server.ts`](../src/http/server.ts) | 本机 HTTP 传输层：监听、body 限制与 JSON 解析、响应发送、连接关闭与运行期错误；不识别管理业务 |
 | [`src/http/routes.ts`](../src/http/routes.ts) | 路由分派与业务错误码到 HTTP 状态码的映射：`/livez`、`/readyz` 与 channel 管理路由 |
 | [`src/channels/manager.ts`](../src/channels/manager.ts) | channel 实例管理器：配置实例清单、运行实例表、按 appId 串行替换启动、启动失败隔离与停机闸门 |
 | [`src/channels/qq/index.ts`](../src/channels/qq/index.ts) | QQ SDK 组装与生命周期、入站过滤后的渠道状态映射、拒绝提示与出站隔离、stop 时注销注册 |
@@ -134,7 +133,7 @@ core 状态为 `starting`、`ready`、`stopping`、`stopped`、`failed`；渠道
 | 新增聊天渠道或适配平台字段 | 渠道适配器；实现 `src/contracts.ts` 的注册、入站与 ReplyPort 契约，在 [`src/channels/manager.ts`](../src/channels/manager.ts) 的工厂与 [`src/runtime.ts`](../src/runtime.ts) 的组装中接入。schema、状态投影与管理路由按 `channels.<type>` 扩展（本期只支持 `qq`） |
 | 调整会话路由、调度或 turn 控制 | 网关核心；同步更新[调度与 turn 控制](subsystems/scheduling.md)与[会话与持久状态](subsystems/session-state.md) |
 | 调整网关配置字段、默认值或文件格式 | [`src/config/schema.ts`](../src/config/schema.ts) 与 [`src/config/store.ts`](../src/config/store.ts)，并同步更新[配置与固定常量](config.md)与 README 示例 |
-| 调整管理命令、错误码或 HTTP 路由 | [`src/management/contracts.ts`](../src/management/contracts.ts)、[`src/management/service.ts`](../src/management/service.ts) 与 [`src/http/routes.ts`](../src/http/routes.ts)，并同步更新[channel 管理](subsystems/channel-admin.md) |
+| 调整管理请求、错误码或 HTTP 路由 | [`src/management/contracts.ts`](../src/management/contracts.ts)、[`src/management/service.ts`](../src/management/service.ts) 与 [`src/http/routes.ts`](../src/http/routes.ts)，并同步更新[channel 管理](subsystems/channel-admin.md) |
 | 调整本机 HTTP 监听、探针或停机顺序 | [`src/runtime.ts`](../src/runtime.ts)、[`src/http/server.ts`](../src/http/server.ts) 与 [`src/http/routes.ts`](../src/http/routes.ts)，并同步更新[健康探针与管理路由](observability.md#readiness)与[宿主接入](#host-integration) |
 | 新增模型、工具或权限能力 | dsh 插件与 profile 组合；模型选择走 `agent-default-model` |
 | 调整超时、长度或发送次数等固定行为常量 | `src/contracts.ts` 的 `GATEWAY_LIMITS`，并同步更新[固定行为常量](config.md#gateway-limits)与相关子系统页 |
@@ -151,7 +150,7 @@ core 状态为 `starting`、`ready`、`stopping`、`stopped`、`failed`；渠道
 |---|---|
 | 本页 | 运行组合、宿主接入、职责边界、消息流骨架、状态所有权、扩展入口 |
 | [入站与 QQ 连接](subsystems/inbound.md) | QQ 连接与生命周期、渠道状态映射、入站过滤、回复窗口 |
-| [channel 管理](subsystems/channel-admin.md) | 实例管理器、管理服务与 HTTP 路由分层、错误码、CLI、QQ 凭证校验 |
+| [channel 管理](subsystems/channel-admin.md) | 实例管理器、管理服务与 HTTP 路由分层、错误码、QQ 凭证校验 |
 | [调度与 turn 控制](subsystems/scheduling.md) | 准入与入队、调度、turn 执行、超时与清理 |
 | [会话与持久状态](subsystems/session-state.md) | 身份键、映射文件、写事务与故障、会话准备、缓存与回收 |
 | [回复规划与投递](subsystems/outbound.md) | 回复规划、提示与顺序、投递、出站隔离 |

@@ -1,6 +1,6 @@
 # 健康、状态与日志
 
-本页描述本机 HTTP 监听的所有权与启停位置、健康探针与管理路由的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理业务与 CLI 的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/http/server.ts`](../src/http/server.ts)、[`src/http/routes.ts`](../src/http/routes.ts)、[`src/management/service.ts`](../src/management/service.ts)、[`src/management/status.ts`](../src/management/status.ts)、[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/channels/qq/index.ts`](../src/channels/qq/index.ts)。
+本页描述本机 HTTP 监听的所有权与启停位置、健康探针与管理路由的判定与响应正文、core 与渠道状态机、结构化日志的事件与字段契约以及凭证脱敏边界；配置字段的定义见 [配置字段](config.md#config-fields)，固定行为常量的取值见 [固定行为常量](config.md#gateway-limits)，入站过滤规则见 [入站过滤](subsystems/inbound.md#inbound-filter)，投递报告状态见 [投递报告](subsystems/outbound.md#reply-port)，映射写事务的故障机制见 [写事务与故障](subsystems/session-state.md#write-transaction)，管理业务与管理路由的完整契约见 [channel 管理](subsystems/channel-admin.md)。源码：[`src/http/server.ts`](../src/http/server.ts)、[`src/http/routes.ts`](../src/http/routes.ts)、[`src/management/service.ts`](../src/management/service.ts)、[`src/management/status.ts`](../src/management/status.ts)、[`src/core/lifecycle.ts`](../src/core/lifecycle.ts)、[`src/core/index.ts`](../src/core/index.ts)、[`src/logging.ts`](../src/logging.ts) 与 [`src/channels/qq/index.ts`](../src/channels/qq/index.ts)。
 
 <a id="readiness"></a>
 
@@ -55,7 +55,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 渠道状态集合为 `connecting`、`online`、`reconnecting`、`blocked`。注册渠道时初始为 `connecting`，此后由渠道适配器通过注册返回的 `setState` 写入；core 不校验渠道状态之间的迁移顺序，只丢弃已注销代次或已移出注册表的写入。只有 `online` 计入就绪：`reconnecting` 记 `channel_reconnecting`，`blocked` 记 `manual_restart_required` 并让 `/readyz` 返回 503。SDK 事件到这四个状态的映射见 [QQ 连接与生命周期](subsystems/inbound.md#qq-connection)；`disabled`/`not_configured` 是健康表的配置派生值，不进入注册表。
 
-渠道只能在 `starting` 或 `ready` 时注册，其他状态注册抛错；`channelId` 与 `accountId` 同时相同的重复注册也抛错，错误消息只含 `channelId`，不含 `accountId`。同一账号注销（`disconnect`）后可用新实例重新注册。`manual_restart_required` 的处置是修复原因后重跑 `dsh-gateway channel enable qq`（拉起新实例），不需要重启进程；冷重启同样有效。
+渠道只能在 `starting` 或 `ready` 时注册，其他状态注册抛错；`channelId` 与 `accountId` 同时相同的重复注册也抛错，错误消息只含 `channelId`，不含 `accountId`。同一账号注销（`disconnect`）后可用新实例重新注册。`manual_restart_required` 的处置是修复原因后调用 `POST /channels/qq/enable`（拉起新实例），不需要重启进程；冷重启同样有效。
 
 `manual_restart_required` 标记需要人工介入的路径；记录该事件本身不改变 core 状态，也不必然进入 `failed`。触发点如下：
 
@@ -63,7 +63,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 |---|---|
 | QQ 认证失败、终局断连（`willReconnect` 为假）或 SDK 启动失败 | QQ 适配器，随后把渠道置 `blocked` |
 | QQ 出站隔离（单次发送超过 `QQ_OUTBOUND_CALL_TIMEOUT_MS` 未结束） | QQ 适配器，随后把渠道置 `blocked` |
-| 渠道注册失败（含管理命令拉起实例失败） | QQ 适配器 / 实例管理器 |
+| 渠道注册失败（含管理请求拉起实例失败） | QQ 适配器 / 实例管理器 |
 | 渠道进入 `blocked` | core |
 | 映射持久化失败（store 转 failed），或 core 因持久状态不可用、释放未收敛进入 `failed` | core |
 | LRU 逐出或陈旧 handle 的释放未收敛，以及 `releaseHandle` 返回后 session 仍在 live registry（条目转 stuck） | 会话管理器 |
@@ -85,7 +85,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | 事件 | 触发点 | 常见字段 |
 |---|---|---|
 | `startup_summary` | runtime 组装时、core 创建之前记录一次启动摘要 | `version`、`schemaVersion`、`configSchemaVersion`、`provider`、`model`、`policy`、`maxConcurrent`、`maxLiveAgents` |
-| `config_template_created` | 首次启动创建了 v2 配置模板（零实例） | `reason`（含模板路径与 `dsh-gateway channel add qq` 指引） |
+| `config_template_created` | 首次启动创建了 v2 配置模板（零实例） | `reason`（含模板路径与添加机器人的指引） |
 | `config_migrated` | 配置文件由 v1 自动迁移为 v2 并写回 | `reason`（含文件路径） |
 | `channel_added` | 管理服务成功添加/更新一个 QQ 实例 | `channelId`、`appId`、`outcome`（响应时状态） |
 | `channel_enabled` | 管理服务启用（或幂等确认）一个 QQ 实例 | `channelId`、`appId`、`outcome` |

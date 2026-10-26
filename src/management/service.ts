@@ -212,7 +212,7 @@ function gatewayNotReadyMessage(state: CoreState): string {
 /**
  * 凭证校验失败的 422 消息。`QQCredentialCheckError` 的 message 由 token 模块自己构造并对
  * 上游正文片段脱敏，原样返回（保留 "HTTP 401" 等可读信息；上游正文片段由 token 模块脱敏）；
- * network 分支追加 `--force` 提示；其他异常按脱敏后的 message 包装。
+ * network 分支追加 `force: true` 提示；其他异常按脱敏后的 message 包装。
  */
 function credentialFailureMessage(error: unknown): string {
   const check = error instanceof QQCredentialCheckError ? error : undefined
@@ -220,7 +220,7 @@ function credentialFailureMessage(error: unknown): string {
     return `credential validation failed: ${redact(errorMessage(error))}`
   }
   if (check.kind === 'network') {
-    return `${check.message}; the endpoint was unreachable; retry, or use --force to skip validation`
+    return `${check.message}; the endpoint was unreachable; retry, or send "force": true in the request body to skip validation`
   }
   return check.message
 }
