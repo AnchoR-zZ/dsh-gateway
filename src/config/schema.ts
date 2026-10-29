@@ -1,7 +1,6 @@
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-
-import { isValidBindingScope } from '../contracts.js'
+import { computeBindingId, isValidBindingScope } from '../contracts.js'
 
 /**
  * 网关配置：唯一环境变量 `DSH_GATEWAY_WORKSPACE` 加 `<workspace>/gateway.config.json`。
@@ -34,6 +33,15 @@ export interface QQChannelInstance {
   readonly enabled: boolean
 }
 
+/** 微信扫码返回的身份及凭证；原始 ID 用于会话键和平台请求。 */
+export interface WeixinChannelInstance {
+  readonly botId: string
+  readonly userId: string
+  readonly botToken: string
+  readonly baseUrl: string
+  readonly enabled: boolean
+}
+
 /** 类型化运行时配置；启动时解析一次。除 channel 实例的增改启（管理路由热生效）外，变更走重启。 */
 export interface GatewayConfig {
   /** `<workspace>/state`。 */
@@ -42,6 +50,7 @@ export interface GatewayConfig {
   readonly workspaceRoot: string
   /** 启动时加载的 QQ 实例清单（含 disabled 实例）。 */
   readonly qqInstances: readonly QQChannelInstance[]
+  readonly weixinInstances: readonly WeixinChannelInstance[]
   readonly debug: boolean
   readonly maxConcurrent: number
   readonly maxPendingPerPeer: number
@@ -54,8 +63,8 @@ export interface GatewayConfig {
 /** 配置文件中的完整字段形状；`schemaVersion` 必填，其余字段可缺省取默认值。 */
 export interface GatewayConfigFile {
   readonly schemaVersion: typeof GATEWAY_CONFIG_SCHEMA_VERSION
-  /** 渠道实例表；本期只支持 `qq` 键。 */
-  readonly channels: { readonly qq: readonly QQChannelInstance[] }
+  /** 渠道实例表；微信字段在旧 v2 配置中可省略。 */
+  readonly channels: { readonly qq: readonly QQChannelInstance[]; readonly weixin?: readonly WeixinChannelInstance[] }
   readonly debug: boolean
   readonly maxConcurrent: number
   readonly maxPendingPerPeer: number
@@ -184,9 +193,8 @@ function parseQQInstance(value: unknown, configPath: string, index: number): QQC
   if (appId.length > CHANNEL_APP_ID_MAX_LENGTH) {
     throw fieldError(configPath, `${field}.appId`, `must be at most ${CHANNEL_APP_ID_MAX_LENGTH} characters`)
   }
-  // appId 是 bindingId 的前缀段（isValidBindingScope）：前置拒绝会在注册面被拒、
-  // 永远 blocked 的字符（如含 `_`）。
-  if (!isValidBindingScope(appId)) {
+  // QQ appId 保持原有的渠道专用字符集，始终是合法的 bindingId 前缀段。
+  if (!/^[A-Za-z0-9-]+$/.test(appId)) {
     throw fieldError(configPath, `${field}.appId`, 'must only contain [A-Za-z0-9-] characters')
   }
   const appSecret = requireNonEmptyString(value.appSecret, configPath, `${field}.appSecret`)
@@ -201,8 +209,40 @@ function parseQQInstance(value: unknown, configPath: string, index: number): QQC
   return Object.freeze({ appId, appSecret, enabled })
 }
 
-/** 校验 `channels` 对象；只允许 `qq` 键，其余键按未知渠道类型拒绝（微信暂未支持）。 */
-function parseChannels(value: unknown, configPath: string): { readonly qq: readonly QQChannelInstance[] } {
+/** 只允许腾讯 HTTPS 主机，避免把凭证发送到不受信任的地址。 */
+export function isTrustedWeixinBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
+      (url.hostname === 'qq.com' || url.hostname.endsWith('.qq.com')) &&
+      url.pathname === '/' && !url.search && !url.hash
+  } catch {
+    return false
+  }
+}
+
+function parseWeixinInstance(value: unknown, configPath: string, index: number): WeixinChannelInstance {
+  const field = `channels.weixin[${index}]`
+  if (!isPlainObject(value)) throw fieldError(configPath, field, 'must be an object')
+  for (const key of Object.keys(value)) {
+    if (!['botId', 'userId', 'botToken', 'baseUrl', 'enabled'].includes(key)) {
+      throw fieldError(configPath, field, `unknown field "${key}"`)
+    }
+  }
+  const botId = requireNonEmptyString(value.botId, configPath, `${field}.botId`)
+  const userId = requireNonEmptyString(value.userId, configPath, `${field}.userId`)
+  if (!isValidBindingScope(botId)) throw fieldError(configPath, `${field}.botId`, 'is not a valid account ID')
+  try { computeBindingId({ channelId: 'weixin', accountId: botId, peerId: userId }) }
+  catch { throw fieldError(configPath, field, 'contains invalid or excessively long IDs') }
+  const botToken = requireNonEmptyString(value.botToken, configPath, `${field}.botToken`)
+  if (botToken.length > 4096) throw fieldError(configPath, `${field}.botToken`, 'is too long')
+  const baseUrl = requireNonEmptyString(value.baseUrl, configPath, `${field}.baseUrl`).replace(/\/$/, '')
+  if (!isTrustedWeixinBaseUrl(baseUrl)) throw fieldError(configPath, `${field}.baseUrl`, 'must be a trusted Tencent HTTPS origin')
+  return Object.freeze({ botId, userId, botToken, baseUrl, enabled: optionalBoolean(value.enabled, configPath, `${field}.enabled`, true) })
+}
+
+/** 校验渠道配置；旧文档缺省微信配置时保持原样。 */
+function parseChannels(value: unknown, configPath: string): GatewayConfigFile['channels'] {
   if (value === undefined) {
     return Object.freeze({ qq: Object.freeze([]) })
   }
@@ -210,20 +250,17 @@ function parseChannels(value: unknown, configPath: string): { readonly qq: reado
     throw fieldError(configPath, 'channels', 'must be an object')
   }
   for (const key of Object.keys(value)) {
-    if (key !== 'qq') {
+    if (key !== 'qq' && key !== 'weixin') {
       throw new GatewayConfigError(
-        `${configPath}: unknown channel type "${key}"; only "qq" is supported (weixin is not supported yet)`,
+        `${configPath}: unknown channel type "${key}"; only "qq" and "weixin" are supported`,
       )
     }
   }
   const qqRaw = value.qq
-  if (qqRaw === undefined) {
-    return Object.freeze({ qq: Object.freeze([]) })
-  }
-  if (!Array.isArray(qqRaw)) {
+  if (qqRaw !== undefined && !Array.isArray(qqRaw)) {
     throw fieldError(configPath, 'channels.qq', 'must be an array')
   }
-  const qq = Object.freeze(qqRaw.map((item, index) => parseQQInstance(item, configPath, index)))
+  const qq = Object.freeze((qqRaw ?? []).map((item, index) => parseQQInstance(item, configPath, index)))
   const seen = new Set<string>()
   for (const instance of qq) {
     if (seen.has(instance.appId)) {
@@ -231,7 +268,16 @@ function parseChannels(value: unknown, configPath: string): { readonly qq: reado
     }
     seen.add(instance.appId)
   }
-  return Object.freeze({ qq })
+  if (value.weixin === undefined) return Object.freeze({ qq })
+  if (!Array.isArray(value.weixin)) throw fieldError(configPath, 'channels.weixin', 'must be an array')
+  const weixin = Object.freeze(value.weixin.map((item, index) => parseWeixinInstance(item, configPath, index)))
+  const weixinIds = new Set<string>()
+  for (const instance of weixin) {
+    const key = instance.botId.toLowerCase()
+    if (weixinIds.has(key)) throw fieldError(configPath, 'channels.weixin', 'contains duplicate bot IDs')
+    weixinIds.add(key)
+  }
+  return Object.freeze({ qq, weixin })
 }
 
 /** 配置文件的全部合法字段；任何其他字段都视为拼写错误或旧版本残留。 */
@@ -372,7 +418,7 @@ export function migrateLegacyGatewayConfigDocument(value: unknown, configPath: s
     const qqAppId = requireNonEmptyString(value.qqAppId, configPath, 'qqAppId')
     // 与 v2 实例同规则（appId 即迁移产物的 channels.qq[0].appId）：在写回迁移文档之前拒绝，
     // 避免非法 v1 被改写为同样非法的 v2 后才报错。
-    if (!isValidBindingScope(qqAppId)) {
+    if (!/^[A-Za-z0-9-]+$/.test(qqAppId)) {
       throw fieldError(configPath, 'qqAppId', 'must only contain [A-Za-z0-9-] characters')
     }
     const qqAppSecret = requireNonEmptyString(value.qqAppSecret, configPath, 'qqAppSecret')
@@ -439,6 +485,7 @@ export function buildGatewayConfig(workspaceDir: string, file: GatewayConfigFile
     stateDir: join(workspaceDir, 'state'),
     workspaceRoot: join(workspaceDir, 'users'),
     qqInstances: file.channels.qq,
+    weixinInstances: file.channels.weixin ?? [],
     debug: file.debug,
     maxConcurrent: file.maxConcurrent,
     maxPendingPerPeer: file.maxPendingPerPeer,

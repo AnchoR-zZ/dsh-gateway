@@ -32,8 +32,14 @@ describe('computeBindingId', () => {
     expect(() => computeBindingId({ ...identity, accountId: 'app_1' })).toThrow(/accountId/)
   })
 
+  it('supports iLink account and user IDs without transforming them', () => {
+    const bindingId = computeBindingId({ channelId: 'weixin', accountId: 'bot-1@im.bot', peerId: 'user_1@im.wechat' })
+    expect(bindingId).toBe('weixin_bot-1@im.bot_user_1@im.wechat')
+    expect(isValidBindingId(bindingId)).toBe(true)
+  })
+
   it('rejects path-unsafe or empty identity segments', () => {
-    for (const peerId of ['', '../escape', 'peer/child', 'peer.child', 'peer with space']) {
+    for (const peerId of ['', '../escape', 'peer/child', 'peer.', 'peer with space']) {
       expect(() => computeBindingId({ ...identity, peerId })).toThrow(/peerId/)
     }
   })
@@ -56,7 +62,7 @@ describe('isValidBindingId', () => {
     expect(isValidBindingId('qq_102000001_')).toBe(false)
     expect(isValidBindingId('qq__peer')).toBe(false)
     expect(isValidBindingId('qq_102000001_peer/child')).toBe(false)
-    expect(isValidBindingId('qq_102000001_peer.child')).toBe(false)
+    expect(isValidBindingId('qq_102000001_peer.')).toBe(false)
     expect(isValidBindingId('qq_102000001_' + 'a'.repeat(BINDING_ID_MAX_LENGTH))).toBe(false)
   })
 })

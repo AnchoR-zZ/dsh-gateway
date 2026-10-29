@@ -3,6 +3,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import pkg from '../package.json' with { type: 'json' }
 import { createChannelManager } from './channels/manager.js'
 import type { QQChannelFactory } from './channels/manager.js'
+import { createWeixinApi } from './channels/weixin/api.js'
+import type { WeixinApi } from './channels/weixin/api.js'
+import { createWeixinManager } from './channels/weixin/manager.js'
+import type { WeixinChannelOptions, WeixinChannel } from './channels/weixin/index.js'
 import { createQQChannel } from './channels/qq/index.js'
 import { createQQBindConnector } from './channels/qq/qr-connect.js'
 import type { QQBindConnector } from './channels/qq/qr-connect.js'
@@ -53,6 +57,8 @@ export interface GatewayLaunchOptions {
   validateQQCredentials?: QQCredentialValidator
   /** QQ 扫码绑定连接器（测试替身避免真实腾讯网络；缺省用官方连接器）。 */
   qqBindConnector?: QQBindConnector
+  weixinApi?: WeixinApi
+  createWeixinChannelAdapter?: (options: WeixinChannelOptions) => WeixinChannel
   /** 结构化日志 sink（默认逐行 stdout）；测试捕获启动摘要与失败事件。 */
   loggerSink?: (line: string) => void
   /**
@@ -170,7 +176,11 @@ export function launchGateway(
   const status = createStatusProjection({
     queries: core.query,
     currentQQInstances: () => configStore.file.channels.qq,
+    currentWeixinInstances: () => configStore.file.channels.weixin ?? [],
   })
+  const weixin = createWeixinManager({ store: configStore, core: core.ingress, queries: core.query,
+    logger, stateDir: gatewayConfig.stateDir, api: options?.weixinApi ?? createWeixinApi(),
+    factory: options?.createWeixinChannelAdapter })
   const management = createManagementService({
     logger,
     store: configStore,
@@ -181,7 +191,7 @@ export function launchGateway(
     qqBindConnector: options?.qqBindConnector ?? createQQBindConnector(),
     coreState: () => core.query.snapshot().state,
   })
-  const routes = createHttpRoutes({ management, logger })
+  const routes = createHttpRoutes({ management, logger, weixin })
   const http = createHttpServer({
     host: options?.http?.host,
     port: options?.http?.port,
@@ -219,6 +229,7 @@ export function launchGateway(
     stopping = true
     // 3. 封闭新的实例启动（含排队中的管理触发启动）。
     manager.beginShutdown()
+    weixin.beginShutdown()
   }
 
   /** 启动失败回滚：先进入停机闸门，再尽力释放已创建资源；不抛回 apply。 */
@@ -226,6 +237,7 @@ export function launchGateway(
     enterShutdown()
     await bestEffort(() => core.lifecycle.stop(), 'core stop after startup failure threw')
     await bestEffort(() => manager.stopAll(), 'channel stop after startup failure threw')
+    await bestEffort(() => weixin.stopAll(), 'Weixin stop after startup failure threw')
     await bestEffort(() => http.close(), 'http close after startup failure threw')
   }
 
@@ -270,6 +282,7 @@ export function launchGateway(
         return
       }
       await startEnabledInstances()
+      if (!stopping) await weixin.startConfigured()
     } catch (err) {
       // 停机引发的启动拒绝属预期（core.stop 可能已清掉资源），不记失败日志、不重复回滚。
       if (stopping) {
@@ -301,6 +314,7 @@ export function launchGateway(
       }),
       core.lifecycle.stop(),
       manager.stopAll(),
+      weixin.stopAll(),
     ])
     let timedOut = false
     await new Promise<void>((resolve) => {

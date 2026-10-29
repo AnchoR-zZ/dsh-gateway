@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": false,
-  "description": "QQ 官方机器人 C2C 文本到 dsh agent 的 cordis 插件网关",
+  "description": "QQ 与微信私聊文本到 dsh agent 的 cordis 插件网关",
   "packageManager": "pnpm@12.11.2",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -23,6 +23,7 @@ import type {
   ReadyzBody,
 } from './protocol.js'
 import type { HttpRequestHandler } from './server.js'
+import type { WeixinManager } from '../channels/weixin/manager.js'
 
 /**
  * HTTP 路由层：把已解析的请求映射到管理业务能力，并把业务错误码映射为 HTTP 状态码。
@@ -41,6 +42,7 @@ import type { HttpRequestHandler } from './server.js'
 export interface HttpRoutesOptions {
   management: GatewayManagement
   logger: GatewayLogger
+  weixin?: WeixinManager
 }
 
 /** 管理业务错误码 → HTTP 状态码（见 `management/contracts.ts` 注释）。 */
@@ -143,6 +145,15 @@ export function createHttpRoutes(options: HttpRoutesOptions): HttpRequestHandler
     if (request.method === 'GET' && request.path === CHANNEL_BIND_PATH) {
       // 挂起直到会话终态；过期/失败/停机在 dispatch 内映射为对应状态码。
       return dispatch(() => management.bindQQWait())
+    }
+    if (options.weixin && request.method === 'POST' && request.path === '/channels/weixin/bind') {
+      try { return bindStartReply((await options.weixin.bindStart()).url) } catch (err) { return errorReply(err) }
+    }
+    if (options.weixin && request.method === 'GET' && request.path === '/channels/weixin/bind') {
+      return dispatch(() => options.weixin!.bindWait())
+    }
+    if (options.weixin && request.method === 'POST' && request.path === '/channels/weixin/enable') {
+      return dispatch(() => options.weixin!.enable(request.body))
     }
     return undefined
   }

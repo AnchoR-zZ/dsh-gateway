@@ -93,9 +93,9 @@ export interface ChannelIdentity {
 export const BINDING_ID_MAX_LENGTH = 128
 
 /** channelId/accountId 的允许字符；不含 `_`，保证 bindingId 的前两段可无歧义拆分。 */
-const BINDING_SCOPE_PATTERN = /^[A-Za-z0-9-]+$/
-/** peerId 的允许字符；允许 `_`，因此 openid 内部的 `_` 不需要额外转义。 */
-const BINDING_PEER_PATTERN = /^[A-Za-z0-9_-]+$/
+const BINDING_SCOPE_PATTERN = /^[A-Za-z0-9@.-]+$/
+/** peerId 的允许字符；允许 `_`、`@` 和 `.`，末尾不能为点以免 Windows 路径别名。 */
+const BINDING_PEER_PATTERN = /^[A-Za-z0-9_@.-]+$/
 
 /** channelId/accountId 是否可作为 bindingId 的前两段。 */
 export function isValidBindingScope(value: string): boolean {
@@ -104,7 +104,7 @@ export function isValidBindingScope(value: string): boolean {
 
 /** peerId 是否可安全地作为 bindingId 的末段和目录名的一部分。 */
 export function isValidBindingPeer(value: string): boolean {
-  return typeof value === 'string' && BINDING_PEER_PATTERN.test(value)
+  return typeof value === 'string' && BINDING_PEER_PATTERN.test(value) && !value.endsWith('.')
 }
 
 /**
@@ -117,13 +117,13 @@ export function isValidBindingPeer(value: string): boolean {
  */
 export function computeBindingId(identity: ChannelIdentity): string {
   if (!isValidBindingScope(identity.channelId)) {
-    throw new Error('channelId must match [A-Za-z0-9-]+')
+    throw new Error('channelId must match [A-Za-z0-9@.-]+')
   }
   if (!isValidBindingScope(identity.accountId)) {
-    throw new Error('accountId must match [A-Za-z0-9-]+')
+    throw new Error('accountId must match [A-Za-z0-9@.-]+')
   }
   if (!isValidBindingPeer(identity.peerId)) {
-    throw new Error('peerId must match [A-Za-z0-9_-]+')
+    throw new Error('peerId must match [A-Za-z0-9_@.-]+ and must not end with a dot')
   }
   const bindingId = `${identity.channelId}_${identity.accountId}_${identity.peerId}`
   if (bindingId.length > BINDING_ID_MAX_LENGTH) {

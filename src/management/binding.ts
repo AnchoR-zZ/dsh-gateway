@@ -134,7 +134,7 @@ function parseBoundCredentials(
   }
   const appId = rawAppId.trim()
   const appSecret = rawAppSecret.trim()
-  if (appId === '' || appId.length > CHANNEL_APP_ID_MAX_LENGTH || !isValidBindingScope(appId)) {
+  if (appId === '' || appId.length > CHANNEL_APP_ID_MAX_LENGTH || !isValidBindingScope(appId) || !/^[A-Za-z0-9-]+$/.test(appId)) {
     return 'the QR flow returned an invalid appId'
   }
   if (appSecret === '' || appSecret.length > CHANNEL_APP_SECRET_MAX_LENGTH) {

@@ -104,9 +104,8 @@ function parseAppId(value: unknown, field: string): string | undefined {
   if (trimmed.length > CHANNEL_APP_ID_MAX_LENGTH) {
     return `${field} must be at most ${CHANNEL_APP_ID_MAX_LENGTH} characters`
   }
-  // 与配置文件同规则：appId 是 bindingId 的前缀段，字符集受限（isValidBindingScope），
-  // 前置拒绝"保存成功却永远无法注册"的实例。
-  if (!isValidBindingScope(trimmed)) {
+  // QQ appId 与配置文件使用相同的渠道专用字符集。
+  if (!isValidBindingScope(trimmed) || !/^[A-Za-z0-9-]+$/.test(trimmed)) {
     return `${field} must only contain [A-Za-z0-9-] characters`
   }
   return undefined

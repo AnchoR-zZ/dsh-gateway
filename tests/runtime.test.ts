@@ -13,6 +13,7 @@ import { QQCredentialCheckError } from '../src/channels/qq/token.js'
 import { GatewayConfigError } from '../src/config/schema.js'
 import type { GatewayConfigFile } from '../src/config/schema.js'
 import { GATEWAY_CONFIG_FILENAME } from '../src/config/store.js'
+import * as httpRoutes from '../src/http/routes.js'
 import { apply } from '../src/index.js'
 import { launchGateway } from '../src/runtime.js'
 import type { GatewayLaunchOptions } from '../src/runtime.js'
@@ -990,6 +991,121 @@ describe('launchGateway qr bind wiring', () => {
 
     await fakeCtx.disposeAll()
     expect(qq.handleOf('qr-app-id')?.stopCalls).toBe(1)
+  })
+})
+
+describe('launchGateway Weixin wiring', () => {
+  it('exposes QR and enable routes, persists the owner, and reports instance readiness', async () => {
+    const fixture = makeEnv({ schemaVersion: 2, channels: { qq: [] } })
+    const fakeCtx = createFakeCordisCtx({ dshHomePath: fixture.dshHome })
+    const logs = createLoggerCapture()
+    const qq = createFakeQQFactory()
+    const port = await reservePort()
+    const stopped = vi.fn()
+    launchGateway(fakeCtx.ctx, fixture.env, makeLaunchOptions(qq, logs, port, {
+      weixinApi: {
+        begin: vi.fn(async () => ({ qrcode: 'qr-value', qrcode_img_content: 'https://qr.example' })),
+        qrStatus: vi.fn(async () => ({ status: 'confirmed', ilink_bot_id: 'bot-1@im.bot', ilink_user_id: 'owner@im.wechat', bot_token: 'weixin-secret' })),
+        updates: vi.fn(), send: vi.fn(),
+      },
+      createWeixinChannelAdapter: ({ core, instance }) => {
+        let ingress: ReturnType<typeof core.registerChannel> | undefined
+        return {
+          async start() { ingress = core.registerChannel({ channelId: 'weixin', accountId: instance.botId, stopReceiving: () => undefined }); ingress.setState('online') },
+          async stop() { stopped(); await ingress?.disconnect() },
+        }
+      },
+    }))
+    await waitForStatus(port, '/readyz', 200, 10_000).catch((error: unknown) => {
+      throw new Error(`Weixin runtime did not become ready: ${String(error)}; logs=${JSON.stringify(logs.lines)}`)
+    })
+    const begin = await fetch(`http://127.0.0.1:${port}/channels/weixin/bind`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    expect(await begin.json()).toEqual({ ok: true, url: 'https://qr.example' })
+    const result = await (await fetch(`http://127.0.0.1:${port}/channels/weixin/bind`)).json()
+    expect(result).toEqual({ ok: true, channel: 'weixin:bot-1@im.bot', state: 'online' })
+    expect((await readyzBody(port)).channels).toEqual({ qq: 'not_configured', 'weixin:bot-1@im.bot': 'online' })
+    expect(JSON.parse(readFileSync(fixture.configPath, 'utf8')).channels.weixin).toEqual([{ botId: 'bot-1@im.bot', userId: 'owner@im.wechat', botToken: 'weixin-secret', baseUrl: 'https://ilinkai.weixin.qq.com', enabled: true }])
+    const enable = await fetch(`http://127.0.0.1:${port}/channels/weixin/enable`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    expect(await enable.json()).toEqual(result)
+    expect(JSON.stringify(logs.lines)).not.toContain('weixin-secret')
+    await fakeCtx.disposeAll()
+    expect(stopped).toHaveBeenCalledOnce()
+  })
+})
+
+describe.each(['qq', 'weixin'] as const)('%s QR shutdown over HTTP', (channel) => {
+  it.each(['creating', 'waiting'] as const)('%s: returns gateway_stopping before closing HTTP and ignores late results', async (stage) => {
+    const fixture = makeEnv({ schemaVersion: 2, channels: { qq: [] } })
+    const fakeCtx = createFakeCordisCtx({ dshHomePath: fixture.dshHome })
+    const logs = createLoggerCapture()
+    const qq = createFakeQQFactory()
+    const bind = createFakeBindConnector()
+    const port = await reservePort()
+    const path = `/channels/${channel}/bind`
+    const requests = new Set<string>()
+    const makeRoutes = httpRoutes.createHttpRoutes
+    const routesSpy = vi.spyOn(httpRoutes, 'createHttpRoutes').mockImplementation((options) => {
+      const route = makeRoutes(options)
+      return (request) => {
+        requests.add(`${request.method} ${request.path}`)
+        return route(request)
+      }
+    })
+    let weixinSignal: AbortSignal | undefined
+    let releaseWeixin: ((response: Record<string, unknown>) => void) | undefined
+    // 上游故意不响应 abort：停机响应不能依赖取消回调或网络请求及时结束。
+    const upstream = (signal: AbortSignal) => {
+      weixinSignal = signal
+      return new Promise<Record<string, unknown>>((resolve) => { releaseWeixin = resolve })
+    }
+    const weixinFactory = vi.fn()
+    const lateResponse = stage === 'creating'
+      ? { qrcode: 'late-qr', qrcode_img_content: 'late-url' }
+      : { status: 'confirmed', ilink_bot_id: 'late@im.bot', ilink_user_id: 'owner@im.wechat', bot_token: 'late-token' }
+    try {
+      launchGateway(fakeCtx.ctx, fixture.env, makeLaunchOptions(qq, logs, port, {
+        qqBindConnector: bind.connector,
+        weixinApi: {
+          begin: (signal) => stage === 'creating' ? upstream(signal) : Promise.resolve({ qrcode: 'qr', qrcode_img_content: 'url' }),
+          qrStatus: (_base, _qr, signal) => upstream(signal),
+          updates: vi.fn(), send: vi.fn(),
+        },
+        createWeixinChannelAdapter: weixinFactory,
+      }))
+      await waitForStatus(port, '/readyz', 200)
+      const starting = fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      }).then(async (response) => ({ status: response.status, body: await response.json() })).catch((error: unknown) => error)
+      await waitFor(() => requests.has(`POST ${path}`))
+      if (stage === 'waiting') {
+        if (channel === 'qq') bind.display('url')
+        expect(await starting).toEqual({ status: 200, body: { ok: true, url: 'url' } })
+      }
+      const waiting = fetch(`http://127.0.0.1:${port}${path}`)
+        .then(async (response) => ({ status: response.status, body: await response.json() })).catch((error: unknown) => error)
+      await waitFor(() => requests.has(`GET ${path}`))
+      await fakeCtx.disposeAll()
+      expect(await waiting).toMatchObject({ status: 503, body: { error: { code: 'gateway_stopping' } } })
+      if (stage === 'creating') {
+        expect(await starting).toMatchObject({ status: 503, body: { error: { code: 'gateway_stopping' } } })
+      }
+      expect(channel === 'qq' ? bind.calls[0]!.signal.aborted : weixinSignal?.aborted).toBe(true)
+      if (channel === 'qq') {
+        bind.display('late-url')
+        bind.succeed([{ appId: 'late-app', appSecret: 'late-secret' }])
+      } else {
+        releaseWeixin!(lateResponse)
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(JSON.parse(readFileSync(fixture.configPath, 'utf8')).channels).toEqual({ qq: [] })
+      expect(qq.handles.size).toBe(0)
+      expect(weixinFactory).not.toHaveBeenCalled()
+      await expect(fetch(`http://127.0.0.1:${port}/livez`)).rejects.toThrow()
+    } finally {
+      releaseWeixin?.(lateResponse)
+      await fakeCtx.disposeAll()
+      routesSpy.mockRestore()
+    }
   })
 })
 

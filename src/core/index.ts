@@ -649,8 +649,7 @@ export function createGatewayCore(options: GatewayCoreOptions): CoreHandle {
             logger.logEvent('manual_restart_required', {
               channelId: channel.channelId,
               generation: ingressGeneration,
-              reason:
-                'channel reported blocked; fix the cause, then POST /channels/qq/enable to start a fresh instance (restarting the gateway is the fallback)',
+              reason: `channel reported blocked; fix the cause, then POST /channels/${channel.channelId}/enable to start a fresh instance (restarting the gateway is the fallback)`,
             })
           } else if (state === 'reconnecting') {
             logger.logEvent('channel_reconnecting', {

@@ -70,7 +70,7 @@ export function normalizeC2CMessage(input: NormalizeC2CInput): InboundDecision {
     return { accepted: false, reason: 'incomplete-fields' }
   }
   // senderId 会进入 bindingId 和工作目录名：只接受可安全拼接的字符集。
-  if (!isValidBindingPeer(input.senderId)) {
+  if (!isValidBindingPeer(input.senderId) || !/^[A-Za-z0-9_-]+$/.test(input.senderId)) {
     return { accepted: false, reason: 'invalid-identity' }
   }
   const target = input.replyTarget

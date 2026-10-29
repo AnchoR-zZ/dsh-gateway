@@ -392,6 +392,22 @@ describe('QQ 扫码绑定会话：未启动、停机与终态', () => {
     expect(h.apply).not.toHaveBeenCalled()
   })
 
+  it('URL 就绪前停机：不依赖上游取消回调，start 与 wait 均拒绝，迟到回调无效', async () => {
+    const h = makeHarness()
+    const starting = h.service.start()
+    const waiting = h.service.wait()
+    h.service.abort()
+
+    expect((await captureManagementError(starting)).code).toBe('gateway_stopping')
+    expect((await captureManagementError(waiting)).code).toBe('gateway_stopping')
+    expect(h.fake.latest.signal.aborted).toBe(true)
+    h.fake.display(BIND_URL)
+    h.fake.succeed([{ appId: 'late-app', appSecret: 'late-secret' }])
+    h.fake.fail(new Error('late upstream failure'))
+    expect((await captureManagementError(h.service.wait())).code).toBe('gateway_stopping')
+    expect(h.apply).not.toHaveBeenCalled()
+  })
+
   it('终态后 abort 是 no-op：不改变已保留的成功结果', async () => {
     const h = makeHarness()
     await startAndDisplay(h)

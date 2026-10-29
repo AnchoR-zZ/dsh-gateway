@@ -241,13 +241,8 @@ describe('parseGatewayConfigDocument: root and schemaVersion', () => {
 })
 
 describe('parseGatewayConfigDocument: channels and instances', () => {
-  it('rejects the weixin channel type with a not-supported message', () => {
-    expect(() =>
-      parseGatewayConfigDocument(validDocument({ channels: { qq: [], weixin: [] } }), CONFIG_PATH),
-    ).toThrow(GatewayConfigError)
-    expect(() =>
-      parseGatewayConfigDocument(validDocument({ channels: { qq: [], weixin: [] } }), CONFIG_PATH),
-    ).toThrow(/unknown channel type "weixin"; only "qq" is supported \(weixin is not supported yet\)/)
+  it('accepts an empty weixin channel array', () => {
+    expect(parseGatewayConfigDocument(validDocument({ channels: { qq: [], weixin: [] } }), CONFIG_PATH).channels.weixin).toEqual([])
   })
 
   it('rejects any other unknown channel type', () => {
@@ -421,7 +416,7 @@ describe('parseGatewayConfigDocument: credential privacy', () => {
     ['invalid integer', { maxConcurrent: 1.5 }],
     ['unknown field', { extra: true }],
     ['blank app id', { channels: { qq: [{ appId: '   ', appSecret: secret }] } }],
-    ['unknown channel type', { channels: { weixin: [] } }],
+    ['unknown channel type', { channels: { telegram: [] } }],
     ['invalid debug', { debug: 'yes' }],
   ])('never includes the appSecret value in errors for %s', (_label, overrides) => {
     try {
@@ -558,6 +553,7 @@ describe('buildGatewayConfig', () => {
         { appId: 'app-1', appSecret: 'secret-1', enabled: true },
         { appId: 'app-2', appSecret: 'secret-2', enabled: false },
       ],
+      weixinInstances: [],
       debug: true,
       maxConcurrent: 6,
       maxPendingPerPeer: 2,
