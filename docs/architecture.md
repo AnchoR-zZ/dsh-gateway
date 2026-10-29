@@ -6,13 +6,13 @@
 
 ## 运行组合
 
-网关通过 dsh 的 cordis 插件机制接入，安装在专用的 base-backed `gateway` profile 中，与 dsh 同进程运行。dsh 提供模型、工具、agent、会话与持久化基础能力；网关对接聊天平台，不另建 gateway 到 dsh 的子进程协议。首个渠道是 QQ 官方机器人 WebSocket，当前只处理 C2C 私聊纯文本。
+网关通过 dsh 的 cordis 插件机制接入，安装在专用的 base-backed `gateway` profile 中，与 dsh 同进程运行。dsh 提供模型、工具、agent、会话与持久化基础能力；网关对接聊天平台，不另建 gateway 到 dsh 的子进程协议。QQ 使用官方机器人 WebSocket，微信使用 iLink 长轮询；两者均只处理私聊纯文本，微信限定扫码用户，见 [微信渠道](subsystems/inbound.md#weixin-channel)。
 
-网关按渠道无关核心、管理业务、HTTP 协议与渠道适配器划分职责。核心不导入 QQ SDK、dsh 运行时包或 `node:http`，也不拥有 HTTP 监听与管理业务；渠道适配器不直接控制 agent 会话。QQ 支持多实例并存：每个配置实例一个适配器（`accountId = appId`），共享全局并发限额；单实例断开或失败只注销该实例（丢其排队任务、中断其运行中执行），调度器与其他实例继续。渠道扩展契约见[扩展位置](#extension-points)。
+网关按渠道无关核心、管理业务、HTTP 协议与渠道适配器划分职责。核心不导入 QQ SDK、dsh 运行时包或 `node:http`，也不拥有 HTTP 监听与管理业务；渠道适配器不直接控制 agent 会话。QQ 支持多实例并存：每个配置实例一个适配器（`accountId = appId`），共享全局并发限额。SDK 断线或异步启动失败只上报渠道状态；主动停止实例时才注销该实例、丢弃其排队任务并中断其运行中执行，调度器与其他实例继续。渠道连接与恢复见 [QQ 连接与生命周期](subsystems/inbound.md#qq-connection)，扩展契约见[扩展位置](#extension-points)。
 
 bundle 组合由根目录 [`cordis.patch.yml`](../cordis.patch.yml) 定义：叠加在 `@deepseek-ai/dsh-base` 之上，插入唯一的 `dsh-gateway` 插件行。该禁用清单禁用 goal 系多轮驱动、subagent 与 workflow、遥测与 HMR、HTTP 远程传输、`tool-jobs` / `tool-web` / `tool-skill` / `tool-working-directory` / `session-title-llm` 等非闭环能力，以及 `user-questions` 这个 UI-backed 服务；一次性 shell 不允许后台执行。审批服务保留但策略为 `never`，permission 预设表含 `gateway-unattended`（workspace-write + never），承接该组合。dsh patch 对一行 config 是整值替换，修改须重述该行完整 config；完整清单以 patch 文件为准。
 
-本机 HTTP 监听由 runtime 组装并拥有：监听在 [`src/http/server.ts`](../src/http/server.ts)，路由在 [`src/http/routes.ts`](../src/http/routes.ts)，业务在 [`src/management/service.ts`](../src/management/service.ts)，默认绑定 `127.0.0.1:17890`。`/livez` 恒 200，`/readyz` 返回管理状态投影的就绪判定与正文，另有仅本机、无鉴权的 channel 管理路由（三个 `POST` 入口与扫码绑定的 `GET` 等待接口；见 [channel 管理](subsystems/channel-admin.md#admin-routes) 与[扫码绑定](subsystems/channel-admin.md#qr-bind)）。监听独占回环地址并兼作单实例占位，端口被占（已有实例）时启动失败并记录 `manual_restart_required`，不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。启动链先绑定监听再启动 core，停止链最后关闭监听，因此停止期间探针仍可观察、管理写请求按 503 `gateway_stopping` 拒绝，关闭后连接被拒绝；探针不承担保活职责，也不接受消息或 channel 管理之外的控制请求。判定细节与响应正文见[健康探针与管理路由](observability.md#readiness)。
+本机 HTTP 监听由 runtime 组装并拥有：监听在 [`src/http/server.ts`](../src/http/server.ts)，路由在 [`src/http/routes.ts`](../src/http/routes.ts)，QQ 管理业务在 [`src/management/service.ts`](../src/management/service.ts)，微信管理业务在 [`src/channels/weixin/manager.ts`](../src/channels/weixin/manager.ts)，默认绑定 `127.0.0.1:17890`。`/livez` 恒 200，`/readyz` 返回管理状态投影的就绪判定与正文，另有仅本机、无鉴权的 channel 管理路由（见 [channel 管理](subsystems/channel-admin.md#admin-routes)）。监听独占回环地址并兼作单实例占位，端口被占时启动失败并记录 `manual_restart_required`；监听句柄会被 `unref`，不阻止进程退出。启动链先绑定监听再启动 core，停止链最后关闭监听，因此停止期间探针仍可观察、管理写请求按 503 `gateway_stopping` 拒绝，关闭后连接被拒绝。判定细节与响应正文见[健康探针与管理路由](observability.md#readiness)。
 
 <a id="host-integration"></a>
 
@@ -69,6 +69,7 @@ cordis disposer 触发停止时，runtime 协调整个进程的停止顺序：`m
 | [`src/channels/manager.ts`](../src/channels/manager.ts) | channel 实例管理器：配置实例清单、运行实例表、按 appId 串行替换启动、启动失败隔离与停机闸门 |
 | [`src/channels/qq/index.ts`](../src/channels/qq/index.ts) | QQ SDK 组装与生命周期、入站过滤后的渠道状态映射、拒绝提示与出站隔离、stop 时注销注册 |
 | [`src/channels/qq/inbound.ts`](../src/channels/qq/inbound.ts) | 入站纯过滤：C2C 文本准入与规范化，无 IO、不导入 SDK |
+| [`src/channels/weixin/index.ts`](../src/channels/weixin/index.ts)、[`manager.ts`](../src/channels/weixin/manager.ts)、[`api.ts`](../src/channels/weixin/api.ts) | 微信 iLink 的扫码、实例生命周期、长轮询、入站过滤与文本回复 |
 | [`src/channels/qq/reply-port.ts`](../src/channels/qq/reply-port.ts) | 每入站一次的回复出口：预算消耗、分段顺序发送、出站超时隔离 |
 | [`src/channels/qq/markdown.ts`](../src/channels/qq/markdown.ts) | Markdown 回复规划纯函数：切分、长度边界、围栏修复与提示文案 |
 | [`src/channels/qq/token.ts`](../src/channels/qq/token.ts) | QQ 凭证在线校验：token 端点 POST、超时与 rejected/network 错误分类 |
@@ -115,7 +116,7 @@ QQ 入站过滤、回复窗口与渠道连接语义分别见[入站过滤](subsy
 
 扫码绑定是管理面的独立流程，不经过 core 的消息执行链路：`POST /channels/qq/bind` 在停机与 core 检查后启动（或复用）腾讯扫码会话，等二维码 URL 就绪后返回；用户扫码后 `GET /channels/qq/bind` 挂起等待终态，成功时复用 add 的落盘与启动路径（跳过凭证在线校验），其余终态映射为稳定错误码。会话状态机在 [`src/management/binding.ts`](../src/management/binding.ts)，腾讯协议经 [`src/channels/qq/qr-connect.ts`](../src/channels/qq/qr-connect.ts) 适配官方 `@tencent-connect/qqbot-connector@1.2.0`；完整契约见[扫码绑定](subsystems/channel-admin.md#qr-bind)。
 
-会话只有一个且只存在内存中：重复 `POST` 复用进行中的会话，终态保留到下一次 `POST` 或进程重启，会话本身不落盘、不写入配置、不参与 `/readyz`；扫码成功后的凭据按 add 路径写入配置并启动实例。进程停机时 `management.beginShutdown()` 作废进行中的会话，挂起的 `GET` 以 503 `gateway_stopping` 结束，不会悬挂到监听关闭。
+会话只有一个且只存在内存中：重复 `POST` 复用进行中的会话，终态保留到下一次 `POST` 或进程重启，会话本身不落盘、不写入配置、不参与 `/readyz`；扫码成功后的凭据按 add 路径写入配置并启动实例，即使已有实例的配置为 `enabled: false`。进程停机时 `management.beginShutdown()` 作废进行中的会话，挂起的 `GET` 以 503 `gateway_stopping` 结束，不会悬挂到监听关闭。
 
 绑定不维护并发或互斥控制：同一时间只有一个内存会话，重复启动复用它；绑定与 add/enable/停机之间只依赖既有的配置串行写与按 `appId` 的启动串行链，不额外加锁。该流程面向单操作者部署，并发绑定以及绑定与 add/enable/停机并发的行为不作保证。
 
@@ -143,7 +144,7 @@ core 状态为 `starting`、`ready`、`stopping`、`stopped`、`failed`；渠道
 
 | 变更 | 所属边界 |
 |---|---|
-| 新增聊天渠道或适配平台字段 | 渠道适配器；实现 `src/contracts.ts` 的注册、入站与 ReplyPort 契约，在 [`src/channels/manager.ts`](../src/channels/manager.ts) 的工厂与 [`src/runtime.ts`](../src/runtime.ts) 的组装中接入。schema、状态投影与管理路由按 `channels.<type>` 扩展（本期只支持 `qq`） |
+| 新增聊天渠道或适配平台字段 | 渠道适配器实现 `src/contracts.ts` 的注册、入站与 ReplyPort 契约，由 [`src/runtime.ts`](../src/runtime.ts) 组装；schema、状态投影与管理路由按 `channels.<type>` 扩展 |
 | 调整会话路由、调度或 turn 控制 | 网关核心；同步更新[调度与 turn 控制](subsystems/scheduling.md)与[会话与持久状态](subsystems/session-state.md) |
 | 调整网关配置字段、默认值或文件格式 | [`src/config/schema.ts`](../src/config/schema.ts) 与 [`src/config/store.ts`](../src/config/store.ts)，并同步更新[配置与固定常量](config.md)与 README 示例 |
 | 调整管理请求、错误码或 HTTP 路由 | [`src/management/contracts.ts`](../src/management/contracts.ts)、[`src/management/service.ts`](../src/management/service.ts) 与 [`src/http/routes.ts`](../src/http/routes.ts)，并同步更新[channel 管理](subsystems/channel-admin.md) |

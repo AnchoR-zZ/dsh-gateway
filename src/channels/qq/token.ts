@@ -2,25 +2,32 @@ import { redact } from '../../logging.js'
 
 /**
  * QQ 凭证在线校验：一次 `POST https://bots.qq.com/app/getAppAccessToken`（body 为
- * `{"appId", "clientSecret"}`），HTTP 200 且响应含非空 `access_token` 即判定凭证有效，
+ * `{"appId", "clientSecret"}`），2xx 响应且响应含非空 `access_token` 即判定凭证有效，
  * 不建立 WebSocket 连接。端点形状与 SDK 内部取 token 路径一致
  * （`@tencent-connect/qqbot-nodejs` 的 token api）。
  *
- * 错误分两类：`rejected`（平台明确拒绝：非 200、响应缺 token、响应不可解析）与
- * `network`（不可达/超时/中断）；调用方据此决定是否允许请求体 `force: true` 跳过。错误消息不含
- * appSecret，上游错误正文片段经 `redact` 后截断附加。
+ * 错误分两类：`rejected`（平台明确拒绝：非 2xx、响应缺 token、响应不可解析）与
+ * `network`（不可达、超时或读取失败，含读取正文）；调用方据此决定是否允许请求体 `force: true` 跳过。非 2xx 时错误消息
+ * 附加经 `redact` 的上游正文片段（截断至 200 字符，正文为空则不附加）：`redact` 只按格式模式替换，
+ * 不按当前 appSecret 的值逐字屏蔽，普通文本里回显的裸凭证可能进入消息。
  */
 
 /** QQ 开放平台 token 端点。 */
 export const QQ_TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken'
 
-/** 单次校验请求的超时（毫秒）。 */
+/**
+ * `fetch` 阶段的超时（毫秒）：定时器在拿到响应或请求失败后清除，之后的 `response.text()`
+ * 读正文不受此期限约束。
+ */
 export const QQ_TOKEN_CHECK_TIMEOUT_MS = 10_000
 
 /** 上游错误正文片段的最大长度。 */
 const QQ_TOKEN_ERROR_SNIPPET_LENGTH = 200
 
-/** 凭证校验失败；kind 区分平台拒绝与网络不可达，message 不含 appSecret。 */
+/**
+ * 凭证校验失败；kind 区分平台拒绝与网络不可达，非 2xx 时 message 含经 `redact` 的上游正文片段，
+ * 不保证其中没有未匹配脱敏模式的凭证回显。
+ */
 export class QQCredentialCheckError extends Error {
   readonly kind: 'rejected' | 'network'
 

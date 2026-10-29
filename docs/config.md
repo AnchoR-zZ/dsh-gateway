@@ -17,23 +17,26 @@
 | 字段 | 必需 / 默认 | 校验与运行时语义 |
 |---|---|---|
 | `schemaVersion` | 必需，只能为 `2` | 缺失报 `is required`；其他版本或类型报 `must be 2; unsupported version <值>`；`1` 走自动迁移 |
-| `channels` | 可选，默认 `{"qq":[]}` | 必须是对象；只允许 `qq` 键，其他键报 `unknown channel type "<键>"`（`weixin` 暂未支持） |
+| `channels` | 可选，默认 `{"qq":[]}` | 必须是对象；只允许 `qq` 与 `weixin` 键，其他键报 `unknown channel type "<键>"` |
 | `channels.qq` | 可选，默认 `[]` | QQ 实例数组，可为空（未配置任何 bot）；元素字段见下表；同数组内 `appId` 不得重复 |
+| `channels.weixin` | 可选，默认无实例 | 微信实例数组，可为空；字段与校验见下文，`botId` 不区分大小写不得重复 |
 | `debug` | 可选，默认 `false` | 布尔值；日志器的正文输出开关，创建日志器时固定 |
 | `maxConcurrent` | 可选，默认 `4` | 正安全整数；core 最大并行任务数（全部实例共享），包含 `prepare`、清理、turn 与最终发送 |
 | `maxPendingPerPeer` | 可选，默认 `3` | 正安全整数；每用户（渠道实例 × 对端）最大等待消息数，不含活动任务 |
 | `maxPendingTotal` | 可选，默认 `100` | 正安全整数；全局最大等待消息数 |
 | `maxPendingBytes` | 可选，默认 `8388608` | 正安全整数；等待正文的 UTF-8 总字节上限 |
 | `idleAgentTtlMs` | 可选，默认 `900000` | 正安全整数；空闲 handle 的回收时间，不删除映射与会话历史 |
-| `maxLiveAgents` | 可选，默认 `32` | 正安全整数且不小于 `maxConcurrent`；live handle 缓存上限，满载且无可逐出空闲条目时 `prepare` 阻塞等待容量 |
+| `maxLiveAgents` | 可选，默认 `32` | 正安全整数且不小于 `maxConcurrent`；`prepare` 按当前缓存条目检查容量，满载且无可逐出空闲条目时阻塞等待；并发准备可能使缓存超过该值，见[缓存与回收](subsystems/session-state.md#lru-recycle) |
 
 `channels.qq` 数组元素的字段（实例标识为 `appId`，启用与凭证分层）：
 
 | 实例字段 | 必需 / 默认 | 校验与运行时语义 |
 |---|---|---|
-| `appId` | 必需 | `trim` 后非空字符串且 ≤128 字符、仅含 `[A-Za-z0-9-]`（bindingId 前缀段约束，含 `_` 等字符直接拒绝）；QQ 渠道的 accountId，也是健康表与管理路由的实例标识 |
-| `appSecret` | 必需 | `trim` 后非空字符串且 ≤256 字符；错误消息与日志不含其值 |
-| `enabled` | 可选，默认 `true` | 布尔值；`false` 的实例不启动，健康表显示 `disabled`，不影响就绪判定 |
+| `appId` | 必需 | `trim` 后非空字符串且 ≤128 字符、仅含 `[A-Za-z0-9-]`；QQ 渠道的 accountId，也是健康表与管理路由的实例标识 |
+| `appSecret` | 必需 | `trim` 后非空字符串且 ≤256 字符；配置加载失败的错误消息与日志不含其值，管理路由的失败响应例外见[凭证在线校验](subsystems/channel-admin.md#credential-check) |
+| `enabled` | 可选，默认 `true` | 布尔值；冷启动跳过 `false` 实例，未注册时健康表显示 `disabled` 且不影响就绪；管理请求更新该实例时的例外见[热生效范围](#hot-reload-scope) |
+
+`channels.weixin` 元素包含必需的 `botId`、`userId`、`botToken`、`baseUrl` 和可选的 `enabled`（默认 `true`）。`botId` 与 `userId` 必须能组成合法身份键，`botToken` 必须非空且不超过 4096 字符；`baseUrl` 先经 `URL` 解析，再要求解析结果同时满足 `https:` 协议、无用户名与密码、无端口、主机为 `qq.com` 或其子域、路径为 `/`、无查询内容与无片段内容。保存时先 `trim` 再移除末尾一个斜杠；拼接 API 路径时只移除末尾一个斜杠、不经 `trim`，`trim` 由调用方负责——配置值在加载时已 `trim`，[微信扫码管理](subsystems/channel-admin.md#weixin-management)返回的 `baseurl` 经 `required()` 先 `trim` 且空串视为缺失；两者都基于原始字符串而非解析后的 origin；原串里的显式 `:443` 与可归一化为 `/` 的点段路径因解析归一化而通过校验，对拼接出的请求地址没有影响；末尾空 `?` 或空 `#` 同样通过校验并被保留，拼接后 API 路径落入查询或片段，请求打到错误 URL。这些字段由[微信扫码管理](subsystems/channel-admin.md#weixin-management)写入，凭证不得提交。
 
 `maxConcurrent`、`maxPendingPerPeer`、`maxPendingTotal`、`maxPendingBytes`、`idleAgentTtlMs` 与 `maxLiveAgents` 这 6 个数值字段必须是正安全整数：类型为 number、`Number.isSafeInteger` 为真且大于 `0`。`0`、负数、小数、`NaN`、`Infinity`、超出安全整数范围的值、字符串、`null`、布尔、对象与数组都报 `must be a positive integer`，不会回落默认值。
 
@@ -51,7 +54,7 @@
 
 ## v1 迁移
 
-检测到 `schemaVersion` 为 `1` 的旧文档时，加载器先按 v1 规则严格校验（未知字段拒绝、数值字段同 v2 规则、`qqAppId` 满足与 v2 相同的 `[A-Za-z0-9-]` 字符集），通过后转换为 v2——`qqAppId`/`qqAppSecret` 变为 `channels.qq[0]`（`enabled: true`），其余字段沿用——并原子写回（同目录临时文件 + rename），日志记一条 `config_migrated`，随后以 v2 继续加载。迁移一次性、单向；迁移后的文件再用旧版代码启动需手工改回 v1 形态。
+检测到 `schemaVersion` 为 `1` 的旧文档时，加载器先按 v1 规则校验（未知字段拒绝、数值字段同 v2 规则、`qqAppId` 满足 `[A-Za-z0-9-]` 字符集），通过后转换为 v2——`qqAppId`/`qqAppSecret` 变为 `channels.qq[0]`（`enabled: true`），其余字段沿用——并原子写回（同目录临时文件 + rename），随后以 v2 继续校验；加载成功时日志记一条 `config_migrated`。v1 校验不检查凭证长度，超长 `qqAppId` 或 `qqAppSecret` 会先写成 v2，再因 v2 长度校验失败而拒绝启动，文件保留迁移后的内容。迁移一次性、单向；迁移后的文件再用旧版代码启动需手工改回 v1 形态。
 
 凭证双空例外：`qqAppId` 与 `qqAppSecret` 双双为 `trim` 后的空串（旧版首启模板形态）时视为无凭证可迁，迁移产物为 `channels.qq: []`（零实例），其余字段照常携带，写回后以零实例正常启动。恰好一个为空、一个非空属真实配置错误，迁移不发生、文件保持原字节、启动失败并报 `qqAppId must be a non-empty string` 或 `qqAppSecret must be a non-empty string`；凭证字段缺失或非字符串、非法字符、未知字段、数值越界等其他非法 v1 文档同样迁移不发生、文件保持原字节、启动失败。
 
@@ -59,9 +62,9 @@
 
 ## 热生效范围与写冲突
 
-channel 实例的添加（含重复 `add` 更新 secret）、启用与凭证变更经本机 HTTP 管理路由（管理服务）热生效，不重启进程（路由契约见 [channel 管理](subsystems/channel-admin.md)）；其余字段（`debug`、`maxConcurrent` 等 limits 与回收参数）不在热生效范围，修改走重启。冷启动路径保留：重启后按已保存配置自动上线全部 `enabled` 实例；停机期间已保存的实例配置保留但不启动，等下一次启动生效。
+channel 实例的添加（含重复 `add` 更新 secret）、启用与凭证变更经本机 HTTP 管理路由（管理服务）热生效，不重启进程（路由契约见 [channel 管理](subsystems/channel-admin.md)）；QQ 的 `add` 或扫码绑定更新已禁用实例时保留 `enabled: false`，但仍会启动该实例。其余字段（`debug`、`maxConcurrent` 等 limits 与回收参数）不在热生效范围，修改走重启。冷启动路径保留：重启后按已保存配置自动上线全部 `enabled` 实例；停机期间已保存的实例配置保留但不启动，等下一次启动生效。
 
-进程是配置文件唯一在线写者：加载时记录"最后已知文件内容"快照，每次管理写入前由 store 重读磁盘，内容与快照不一致（文件被外部修改且进程未重启）时拒绝写入并返回 409，绝不静默覆盖；处置方式是重启 dsh 或把文件改回快照内容。写回一律走同目录临时文件 + rename 的原子替换，成功后更新快照，不残留 `.tmp` 文件。手工编辑配置后重启 dsh 仍是合法的冷路径；移除 bot 本期无命令，同样走手工编辑 + 重启。
+进程是配置文件唯一在线写者：加载时记录"最后已知文件内容"快照，每次管理写入前由 store 重读磁盘，双方移除开头的 BOM 后比较；其余内容与快照不一致时拒绝写入并返回 409。仅增删开头 BOM 不会触发漂移拒绝，后续写回会覆盖这一外部改动。漂移的处置方式是重启 dsh 或把文件改回快照内容。写回一律走同目录临时文件 + rename 的原子替换，成功后更新快照，不残留 `.tmp` 文件。手工编辑配置后重启 dsh 仍是合法的冷路径；移除 bot 本期无命令，同样走手工编辑 + 重启。
 
 配置文件含明文 `appSecret`，网关不做文件权限检查或加密；把 workspace 放在仓库外、限制 ACL 与不得提交的要求见 [README](../README.md)。
 
@@ -113,4 +116,4 @@ dsh home 不来自环境变量，而是启动时从 dsh 根上下文的 `dshHome
 ## 已知缺口
 
 - `isPathOverlapping` 只比较 `path.resolve`/`path.relative` 归一化后的路径字符串，不解析符号链接或 junction；经这类别名指向 dsh home 的 workspace 不会被判为重叠。
-- 读取已有配置时由 `loadGatewayConfigStore` 剥离文件开头的 UTF-8 BOM，但自动测试只断言模板自身不带 BOM，带 BOM 文件的读取路径没有测试覆盖。
+- 漂移比较剥离两侧开头 BOM 后比文本，纯 BOM 增删因此不触发 409（见[热生效范围](#hot-reload-scope)），该分支没有自动化用例覆盖：`tests/` 未构造带开头 BOM 的配置文件，也没有纯 BOM 增删的漂移用例。

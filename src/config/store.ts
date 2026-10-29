@@ -162,8 +162,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *
  * 顺序：绝对路径校验 → workspace/dsh home 重叠校验 → 建 workspace → 读/建配置文件 →
  * 剥 BOM 后 JSON.parse → v1 检测（`schemaVersion === 1` 时校验旧文档、转换为 v2、原子写回，
- * 单向一次性）→ v2 严格校验 → 派生 state/users 路径。校验失败时不覆盖已有文件；首次自动
- * 创建的 v2 模板（`channels.qq` 为空数组）可直接加载，进程以零渠道实例正常启动。
+ * 单向一次性）→ v2 严格校验 → 派生 state/users 路径。除 v1 迁移写回外（先写回迁移结果、
+ * 再做 v2 校验），校验失败不覆盖已有文件；首次自动创建的 v2 模板（`channels.qq` 为空数组）
+ * 可直接加载，进程以零渠道实例正常启动。
  */
 export function loadGatewayConfigStore(options: LoadGatewayConfigOptions): GatewayConfigStore {
   const { workspaceDir, dshHome } = options

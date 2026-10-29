@@ -6,7 +6,7 @@
 
 ## 健康探针与管理路由
 
-本机 HTTP 监听由 runtime 组装并拥有（[`src/runtime.ts`](../src/runtime.ts) 创建 [`createHttpServer`](../src/http/server.ts) 与 [`createHttpRoutes`](../src/http/routes.ts)，不属于 core 或管理服务），默认绑定 `127.0.0.1:17890`。`GET` 探针只读，另有仅本机、无鉴权的 channel 管理路由：三个 `POST` 入口与扫码绑定的 `GET` 等待接口（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用（例如已有实例在运行）时启动失败（runtime 记录 `manual_restart_required` 并回滚），不尝试结束占用进程；监听句柄会被 `unref`，不阻止进程退出。
+本机 HTTP 监听由 runtime 组装并拥有（[`src/runtime.ts`](../src/runtime.ts) 创建 [`createHttpServer`](../src/http/server.ts) 与 [`createHttpRoutes`](../src/http/routes.ts)，不属于 core 或管理服务），默认绑定 `127.0.0.1:17890`。`GET` 探针只读，另有仅本机、无鉴权的 QQ 与微信 channel 管理路由（见下表与 [管理路由](subsystems/channel-admin.md#admin-routes)）；不接受消息或其他控制请求。监听独占回环端口并兼作单实例占位：端口已被占用时启动失败，runtime 记录 `manual_restart_required` 并回滚；监听句柄会被 `unref`，不阻止进程退出。
 
 | 请求 | 状态码 | 响应正文 | 条件 |
 |---|---|---|---|
@@ -15,11 +15,12 @@
 | `POST /channels/qq`、`POST /channels/qq/enable` | 200/400/404/409/422/503/500 | 成功 `{"ok":...}` 或 `{"error":{"code","message"}}` | 仅 `POST` + `application/json`（否则 404/400）；契约见 [管理路由](subsystems/channel-admin.md#admin-routes) |
 | `POST /channels/qq/bind` | 200/400/409/502/503 | `{"ok":true,"url":...}` 或错误正文 | 仅 `POST` + `application/json`（否则 404/400）；二维码在 URL 就绪前过期时 409；契约见 [扫码绑定](subsystems/channel-admin.md#qr-bind) |
 | `GET /channels/qq/bind` | 200/409/500/502/503 | 成功同 `POST /channels/qq`，或错误正文 | 挂起等待绑定终态，无响应期限；契约见 [扫码绑定](subsystems/channel-admin.md#qr-bind) |
-| 其他路径或方法 | 404 | `{"error":"not found"}` | 不区分路径是否存在，也不提供其他控制语义 |
+| `POST /channels/weixin/bind`、`GET /channels/weixin/bind`、`POST /channels/weixin/enable` | 200/400/404/409/500/502/503 | 成功结果或错误正文 | 契约见[微信管理](subsystems/channel-admin.md#weixin-management) |
+| 其他路径或方法 | 404 或 400 | `{"error":"not found"}` 或 `{"error":{"code","message"}}` | 路由未命中返回 404；`POST` 在路由匹配前校验内容类型并解析 body，校验失败先返回 400 |
 
-查询串在匹配前被去掉，`/livez?probe=1` 与 `/livez` 等价；所有响应都带 `content-type: application/json`。管理请求 body 上限 64 KiB，坏 JSON、读取中断与非 JSON 内容类型按 400（`invalid_request`）拒绝；未命中路径或方法回 404 `{"error":"not found"}`；处理器抛出非管理异常时回 500（`internal_error`）并记一条 `state_warning`（`reason` 以 `admin request failed:` 开头）。
+查询串在匹配前被去掉，`/livez?probe=1` 与 `/livez` 等价；所有响应都带 `content-type: application/json`。所有 `POST` 请求在路由匹配前检查内容类型并解析 body：body 上限 64 KiB，超限、坏 JSON、读取中断与非 JSON 内容类型按 400（`invalid_request`）拒绝，空 body 视为 `{}`。通过传输层校验后，未命中路径或方法回 404 `{"error":"not found"}`；处理器抛出非管理异常时回 500（`internal_error`）并记一条 `state_warning`（`reason` 以 `admin request failed:` 开头）。
 
-就绪谓词由 [`src/management/status.ts`](../src/management/status.ts) 的 `createStatusProjection` 计算，`/readyz` 与管理服务的 `getStatus()` 使用同一份结果，要求三项同时成立：core 状态为 `ready`、映射 store 未进入 failed、健康渠道表中除 `disabled` 与 `not_configured` 外的条目全部为 `online`。因此已启用实例处于 `connecting`/`reconnecting`/`blocked`（含"enabled 但未注册"的 `blocked` 铺底值）时整体 503；`not_configured` 与 `disabled` 条目不影响就绪，零渠道实例（空数组或全部 disabled）时 `/readyz` 返回 200。
+就绪谓词由 [`src/management/status.ts`](../src/management/status.ts) 的 `createStatusProjection` 计算，`/readyz` 与管理服务的 `getStatus()` 使用同一份结果，要求三项同时成立：core 状态为 `ready`、映射 store 未进入 failed、健康渠道表中除 `disabled` 与 `not_configured` 外的条目全部为 `online`。已注册实例使用运行状态，即使配置为 `enabled: false`；处于 `connecting`/`reconnecting`/`blocked` 时整体返回 503。未注册实例按配置铺底：`enabled` 为真时为 `blocked`，否则为 `disabled`；铺底的 `blocked` 只表示配置已启用但没有运行实例（从未启动或启动失败），与已注册实例的运行状态 `blocked`（断线、认证失败、出站隔离等）来源不同，对就绪的影响相同。`not_configured` 与 `disabled` 条目不影响就绪；没有已注册实例且配置为空或全部 `disabled` 时，其他就绪条件成立则返回 200。
 
 扫码绑定会话不进入状态投影：绑定进行中、等待扫码或二维码过期都不改变上述判定与 `channels` 表；扫码成功并启动实例后，实例按常规渠道状态参与就绪判定。
 
@@ -33,7 +34,7 @@
 | `running` | number | 已占用全局执行槽的在飞任务数，含 `execute` 与 `queueExpired` 两类 |
 | `startedAt` | string | core 进入 `ready` 时的 UTC ISO 8601 时间；进入 `ready` 之前为空字符串 |
 
-`channels` 的值集合：已注册实例为 `connecting`、`online`、`reconnecting`、`blocked`（注册表实时状态）；配置派生值为 `disabled`（配置存在且 `enabled: false`、未注册）与 `not_configured`（类型零实例）。正文不含用户标识、`sessionId` 或错误原文；键中的 `AppID` 是实例标识，属正文合法内容。
+`channels` 的值集合：注册表实时状态 `connecting`、`online`、`reconnecting`，以及配置派生值 `disabled`（配置存在且 `enabled: false`、未注册）与 `not_configured`（类型零实例，当前仅 `qq`）；`blocked` 有两个来源——已注册实例的运行状态，以及未注册但 `enabled: true` 的配置铺底值，来源差异与就绪后果见上文就绪谓词。正文不含用户标识、`sessionId` 或错误原文；键中的 `AppID` 是实例标识，属正文合法内容。
 
 监听在 runtime 启动链的第一步绑定，先于 core 启动：core 处于 `starting` 期间 `/livez` 已返回 200，`/readyz` 返回 503 且 `coreState` 为 `starting`、`startedAt` 为空字符串。绑定失败时 `http.start()` 拒绝、core 不启动，runtime 记录 `manual_restart_required`（`gateway startup failed: ...`）并回滚已创建资源；core 启动失败（如状态映射加载失败）时 core 状态保持 `starting` 且不自行清理资源，同样由 runtime 记录 `manual_restart_required` 后回滚（停止 core 与渠道实例、关闭 HTTP）。
 
@@ -59,7 +60,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 渠道状态集合为 `connecting`、`online`、`reconnecting`、`blocked`。注册渠道时初始为 `connecting`，此后由渠道适配器通过注册返回的 `setState` 写入；core 不校验渠道状态之间的迁移顺序，只丢弃已注销代次或已移出注册表的写入。只有 `online` 计入就绪：`reconnecting` 记 `channel_reconnecting`，`blocked` 记 `manual_restart_required` 并让 `/readyz` 返回 503。SDK 事件到这四个状态的映射见 [QQ 连接与生命周期](subsystems/inbound.md#qq-connection)；`disabled`/`not_configured` 是健康表的配置派生值，不进入注册表。
 
-渠道只能在 `starting` 或 `ready` 时注册，其他状态注册抛错；`channelId` 与 `accountId` 同时相同的重复注册也抛错，错误消息只含 `channelId`，不含 `accountId`。同一账号注销（`disconnect`）后可用新实例重新注册。`manual_restart_required` 的处置是修复原因后调用 `POST /channels/qq/enable`（拉起新实例），不需要重启进程；冷重启同样有效。
+渠道只能在 `starting` 或 `ready` 时注册，其他状态注册抛错；`channelId` 与 `accountId` 同时相同的重复注册也抛错，错误消息只含 `channelId`，不含 `accountId`。同一账号注销（`disconnect`）后可用新实例重新注册。`manual_restart_required` 的处置是修复原因后调用对应的 `POST /channels/qq/enable` 或 `POST /channels/weixin/enable`；微信凭证失效时需重新扫码。
 
 `manual_restart_required` 标记需要人工介入的路径；记录该事件本身不改变 core 状态，也不必然进入 `failed`。触发点如下：
 
@@ -74,7 +75,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | 停机预算内未完成的步骤 | 停止协调器 |
 | runtime 异步启动失败，或停机总预算内启动任务、管理在途操作、core 停止与实例停止未全部收敛 | runtime |
 
-同一次渠道故障通常产生两行：QQ 侧带具体 `reason` 的归因行，以及 core 对 `blocked` 的记录行；字段互补，不要按行数统计故障数。
+渠道故障产生的行数、先后顺序与归因差异见[日志事件](#log-events)；归因行与 core 状态行字段互补，不要按行数统计故障数。
 
 <a id="log-events"></a>
 
@@ -113,7 +114,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 扫码绑定不新增日志事件：成功落盘与启动复用 `channel_added`（字段相同），绑定会话自身的可预期失败只通过 HTTP 响应返回、不记日志事件；扫码成功后的实例启动失败仍走既有日志（`channel_added` 的 `outcome` 与 `manual_restart_required`）。二维码 URL 与 `task_id` 不主动写入日志。
 
-渠道进入 `reconnecting` 或 `blocked` 时，渠道侧与 core 侧会各记一行：QQ 先记带原因的 `channel_reconnecting` 或 `manual_restart_required`，core 随后记状态行；释放未收敛等路径也可能由会话管理器与 core 各记一条 `manual_restart_required`。字段互补，按 `channelId`、`bindingId` 与时间聚合，不要按行数统计故障数。
+QQ 进入 `reconnecting` 或 `blocked` 时，通常由 QQ 侧先记带原因的 `channel_reconnecting` 或 `manual_restart_required`，再由 core 记状态行。微信进入 `reconnecting` 时只有 core 记状态行，渠道侧不记日志；微信在已注册实例上进入 `blocked` 时，先由 core 记状态行（`setState` 内同步记录），再由微信侧记带原因的 `manual_restart_required`。例外是实例启动失败：失败发生在注册之前（[`src/channels/weixin/manager.ts`](../src/channels/weixin/manager.ts) 的 `start()` 抛错分支），只有实例管理器记一条 `manual_restart_required`，没有 core 行，健康表按配置铺底显示 `blocked`。释放未收敛等路径也可能由会话管理器与 core 各记一条 `manual_restart_required`；字段互补，按 `channelId`、`bindingId` 与时间聚合，不要按行数统计故障数。core 的 `setState` 不按状态迁移去重，同一状态重复置位时每次都记行（微信长轮询每失败一轮就再记一条 `channel_reconnecting`）。
 
 `startup_summary` 字段的取值边界为：`version` 是插件版本（`package.json` 的 `version`），`schemaVersion` 是映射文件 schema 版本，`configSchemaVersion` 是配置文件 schema 版本，`provider` 与 `model` 取自启动时读取一次的默认模型选择，`policy` 是描述审批 `never`、sandbox `workspace-write` 与工作目录边界的固定摘要字符串，`maxConcurrent` 与 `maxLiveAgents` 是有效配置值。该事件不 dump 环境变量或完整配置。
 
@@ -121,7 +122,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 |---|---|---|
 | `requestId` | string | core 为每个通过形态校验的入站生成的请求标识；`queued`、容量拒绝、投递与 turn 事件 |
 | `channelId` | string | 渠道标识，QQ 恒为 `qq` |
-| `appId` | string | channel 管理事件携带的实例标识（QQ 机器人 AppID）；`appSecret` 恒不输出 |
+| `appId` | string | channel 管理事件携带的实例标识（QQ 机器人 AppID）；日志没有 `appSecret` 字段 |
 | `bindingId` | string | 身份键，见[脱敏与敏感数据](#redaction) |
 | `sessionId` | string | dsh 会话 id |
 | `generation` | number | 会话事件中为映射 `generation`，渠道事件中为渠道代次 |
@@ -145,7 +146,7 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 | `model` | string | `startup_summary`：模型 id |
 | `policy` | string | `startup_summary`：有效策略摘要 |
 | `maxConcurrent` | number | `startup_summary`：并行任务上限 |
-| `maxLiveAgents` | number | `startup_summary`：live handle 上限 |
+| `maxLiveAgents` | number | `startup_summary`：live handle 容量阈值；准备中的并发创建或恢复不预留容量，缓存条数可以超过该值，见[配置字段](config.md#config-fields) |
 
 <a id="redaction"></a>
 
@@ -162,9 +163,11 @@ core 状态集合为 `starting`、`ready`、`stopping`、`stopped`、`failed`，
 
 脱敏在序列化前执行：`logEvent` 只对 `error` 与 `reason` 两个字段调用 `redact`，其他字段原样输出；`debugBody` 对 `text` 脱敏；`sdk_log` 对 `message` 与序列化后的 `meta` 脱敏。
 
-扫码绑定的二维码 URL 与其 `task_id` 只通过 `POST /channels/qq/bind` 的成功响应交给调用方，网关不主动写入日志；绑定失败时进入 `error`/`reason` 与错误正文的上游文本会先经过 `task_id` 参数值清洗与上述 `redact` 脱敏（见 [`src/management/binding.ts`](../src/management/binding.ts) 的 `describeFailure`）。扫码得到的 `appSecret` 按上述规则恒不输出。
+扫码绑定的二维码 URL 与其 `task_id` 只通过 `POST /channels/qq/bind` 的成功响应交给调用方，网关不主动写入日志；绑定失败时进入 `error`/`reason` 与错误正文的上游文本会先经过 `task_id` 参数值清洗与上述 `redact` 脱敏（见 [`src/management/binding.ts`](../src/management/binding.ts) 的 `describeFailure`）。`redact` 只识别上述形态，不按实际 `appSecret` 的值逐字屏蔽；自由文本中的凭证可能未被替换，QQ 校验的错误响应边界见 [QQ 凭证在线校验](subsystems/channel-admin.md#credential-check)。
 
-`LogFields` 不提供原始 `user_openid` 字段；`appId` 字段携带实例标识（QQ 机器人 AppID，channel 管理事件使用，`appSecret` 恒不输出）。`bindingId` 在 QQ 下由 `qq_<AppID>_<user_openid>` 组成，会随 `queued`、会话事件、准入拒绝、提示投递与 core 的 turn 失败事件输出，日志文件与采集链路应按敏感数据保护。探针正文不含用户标识、`sessionId` 与错误原文；AppID 以实例键 `qq:<AppID>` 的形式出现在 `channels` 表中（见[健康探针与管理路由](#readiness)）。
+微信扫码 URL 只通过 `POST /channels/weixin/bind` 成功响应交给调用方；微信 token、轮询游标与 `context_token` 不写入日志或管理响应，微信 API 错误只记录错误码而不转发上游正文。微信 `bindingId` 包含机器人与用户原始 ID，日志应按敏感数据保护。
+
+`LogFields` 不提供原始 `user_openid` 或 `appSecret` 字段；`appId` 字段携带实例标识（QQ 机器人 AppID，channel 管理事件使用）。`bindingId` 在 QQ 下由 `qq_<AppID>_<user_openid>` 组成，会随 `queued`、会话事件、准入拒绝、提示投递与 core 的 turn 失败事件输出，日志文件与采集链路应按敏感数据保护。探针正文不含用户标识、`sessionId` 与错误原文；AppID 以实例键 `qq:<AppID>` 的形式出现在 `channels` 表中（见[健康探针与管理路由](#readiness)）。
 
 默认不记录消息正文、工具参数或模型推理：事件字段集里没有正文字段，唯一能写出正文的 `debugBody` 在源码中没有调用点，因此即使配置 `debug: true` 也不会产生 `debug_body` 行。`debug` 在创建日志器时固定，切换需要重启；正文与 `error`/`reason` 的脱敏始终生效。
 

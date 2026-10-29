@@ -1,6 +1,6 @@
 # 回复规划与投递
 
-本页描述 QQ 渠道的回复规划、提示合并与投递语义，以及发送超时后的渠道出站隔离；入站过滤与被动回复窗口见 [入站过滤](inbound.md#inbound-filter)，turn 终态与截止时间见 [turn 执行](scheduling.md#turn-runner) 与 [超时、取消与清理](scheduling.md#cancellation)，日志事件见 [日志事件](../observability.md#log-events)。源码：[`src/channels/qq/markdown.ts`](../../src/channels/qq/markdown.ts)、[`src/channels/qq/reply-port.ts`](../../src/channels/qq/reply-port.ts)、[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
+本页描述 QQ 渠道的回复规划、提示合并与投递语义，以及发送超时后的渠道出站隔离；微信复用回复规划与端口，其不同的预算和发送行为见[微信渠道](inbound.md#weixin-channel)。源码：[`src/channels/qq/markdown.ts`](../../src/channels/qq/markdown.ts)、[`src/channels/qq/reply-port.ts`](../../src/channels/qq/reply-port.ts)、[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts)、[`src/channels/weixin/index.ts`](../../src/channels/weixin/index.ts) 与 [`src/contracts.ts`](../../src/contracts.ts)。
 
 <a id="reply-planning"></a>
 
@@ -37,14 +37,14 @@
 | 提示 | 文案 | 触发 |
 |---|---|---|
 | `session-recreated` | 原会话无法恢复，已开启新会话。 | 恢复失败或 cwd 不一致后重建成功 |
-| `turn-failed` | 本次处理失败，请稍后重试。 | prepare 创建失败、turn 失败、无可用最终文本、运行契约异常或 fatal |
+| `turn-failed` | 本次处理失败，请稍后重试。 | prepare 创建失败、turn 失败、无可用最终文本、运行契约异常或投递前的终态 flush 失败 |
 | `turn-timeout` | 本次处理超时，请稍后重试。 | 执行截止或准备超时 |
 | `empty-reply` | 本次未生成可发送的文本，请稍后重试。 | 最终文本为空 |
 | `model-output-limited` | 模型输出达到上限，回复可能不完整。 | `max-tokens` 且有文本 |
 | `busy` | 当前排队消息较多，请稍后再试。 | 队列容量拒绝，经渠道独立槽发送 |
 | `queue-expired` | 等待时间过长，本条消息未处理，请重新发送。 | 出队时剩余窗口不足 |
 | `service-stopping` | 服务正在停止，请稍后重试。 | core 不在 ready 时的 stopping 拒绝 |
-| `state-unavailable` | 会话状态暂不可用，请稍后重试。 | core failed 或持久状态不可用 |
+| `state-unavailable` | 会话状态暂不可用，请稍后重试。 | 新入站被 `unavailable` 拒绝（core failed、持久状态不可用、形态校验失败、身份校验失败），或 prepare 返回 `fatal` |
 | `truncated`（渠道规划） | 回复过长，已截断。 | 正文条数超过预算，需要丢弃末尾内容 |
 
 合并顺序为：重复类型只保留首次出现；`session-recreated` 恒排最前，其余保持 `notices` 输入顺序；合并后用换行连接。有正文时，含恢复提示的消息排在正文之前，其他提示消息排在正文之后；无正文时只发这一条提示消息。信封中的提示消息占一条条数预算，合并后文本超过 `L` 时规划降级。

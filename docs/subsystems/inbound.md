@@ -1,6 +1,6 @@
-# 入站与 QQ 连接
+# 入站与渠道连接
 
-本页描述 QQ 渠道的 SDK 组装、连接生命周期与状态映射、入站纯过滤、被动回复窗口，以及渠道侧拒绝提示的发送归属；实例的按配置拉起、替换重启与管理路由见 [channel 管理](channel-admin.md#channel-manager)，core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示文案、回复规划与投递见 [回复规划与投递](outbound.md#notice-order)，健康判定见 [健康探针与管理路由](../observability.md#readiness)，日志字段见 [日志事件](../observability.md#log-events)。源码：[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts)、[`src/channels/qq/inbound.ts`](../../src/channels/qq/inbound.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
+本页描述 QQ 与微信的连接生命周期、入站过滤与回复窗口；实例管理见 [channel 管理](channel-admin.md#channel-manager)，core 准入与排队见 [调度与 turn 控制](scheduling.md#ingress-admission)，提示与投递见 [回复规划与投递](outbound.md#notice-order)。源码：[`src/channels/qq/index.ts`](../../src/channels/qq/index.ts)、[`src/channels/qq/inbound.ts`](../../src/channels/qq/inbound.ts)、[`src/channels/weixin/index.ts`](../../src/channels/weixin/index.ts)、[`src/channels/weixin/api.ts`](../../src/channels/weixin/api.ts)、[`src/contracts.ts`](../../src/contracts.ts) 与 [`src/core/index.ts`](../../src/core/index.ts)。
 
 <a id="qq-connection"></a>
 
@@ -106,6 +106,20 @@ core 的准入返回与渠道动作如下：
 core 在不同阶段使用同一窗口：入队时已过期直接返回 `expired` 并关闭回复端口；出队时已过期丢弃并记录 `expired before dequeue`；剩余窗口小于 `TURN_DEADLINE_MS + QQ_OUTBOUND_MARGIN_MS`（600,000 + 180,000 = 780,000 ms）时改发 `queue-expired` 信封。阈值与队列行为见 [调度](scheduling.md#scheduler)。
 
 去重完全委托 SDK：渠道只装载不带参数的 `messageFilter()` 一个中间件，使用 SDK 默认去重窗口；网关不维护去重表，也不为去重持久化消息 ID，窗口外的重复推送可能再次执行完整 turn。
+
+<a id="weixin-channel"></a>
+
+## 微信渠道
+
+每个启用的微信机器人以 `weixin` 和扫码返回的 `botId` 注册独立实例，使用 iLink `getupdates` 长轮询；首次请求成功或正常超时后为 `online`，网络失败为 `reconnecting` 并间隔 5 秒重试，错误码 `-14` 为凭证失效，实例转 `blocked`，需重新扫码。停机中止轮询并注销实例。
+
+仅处理 `message_type` 为 `1`、发送者与扫码返回的 `userId` 完全一致、没有群 ID、带 `context_token` 且所有内容项均为文本、合并后非空的消息；其他用户、群聊、机器人消息和包含附件的消息不进入 core。首条合格消息直接进入现有队列。同一消息的 `context_token` 只用于该消息的回复，不写入配置、游标或日志。
+
+每个实例的游标写入 `<workspace>/state/weixin/<botId 的 SHA-256>.json`；一批消息完成过滤和准入后，以同目录临时文件替换游标，之后才继续拉取。游标读取或写入失败使实例无法启动或转 `blocked`。内存队列不保证崩溃恢复：游标保存后崩溃可能丢失排队消息，保存前崩溃可能重复投递。
+
+每条入站从网关本地接收时间起使用一小时排队和回复期限，这是网关策略而非微信协议有效期。每次入站最多四条文本，回复规划每段最多 2000 UTF-16 单元，发送时把换行转换为 CRLF；回复使用当前消息的上下文令牌，发送失败不补发。拒绝提示最多四个并发发送槽，其发送失败或超时只记录 `reply_failed`；任一发送返回凭证失效错误码 `-14` 时，实例转 `blocked`。普通回复逐段发送，只有某一段发送超过 `QQ_OUTBOUND_CALL_TIMEOUT_MS`（35,000 ms）未收敛才使实例转 `blocked`；一小时窗口到期只把本次投递收敛为 `expired` 或 `partial` 报告，不隔离实例。详情见[投递](outbound.md#reply-port)。
+
+隔离只中止当前长轮询、保留 core 注册（`ingress.disconnect()` 只在 `stop()` 中调用，停机与替换实例都会注销），轮询不会自动恢复。实例因此停在 `blocked` 而不是 `disabled`：隔离不改配置，`enabled` 仍为 `true`，健康表对已注册实例读运行状态，而 `disabled` 只表示配置未启用且没有运行实例（见 [健康探针](../observability.md#readiness)）。凭证失效（`-14`）后配置里仍是不再有效的 `botToken`，`enable` 只是用同一 token 再建一个实例，`-14` 在新实例首次 `getupdates` 时再报；恢复需重新扫码，新 `botToken` 落盘后替换实例，路由与起停顺序见 [微信管理](channel-admin.md#weixin-management)。其他隔离可用 `POST /channels/weixin/enable` 或重启进程恢复；`enable` 已 `online` 时只写配置、不替换实例。
 
 <a id="known-gaps"></a>
 

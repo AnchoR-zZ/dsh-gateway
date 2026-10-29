@@ -12,9 +12,9 @@
 
 | 片段 | 允许字符 | 约束 |
 |---|---|---|
-| `channelId` | `[A-Za-z0-9-]+` | 不含 `_`，保证前两段可无歧义拆分 |
-| `accountId` | `[A-Za-z0-9-]+` | 不含 `_`，同上 |
-| `peerId` | `[A-Za-z0-9_-]+` | 允许 `_`，QQ openid 内部的 `_` 不需要转义 |
+| `channelId` | `[A-Za-z0-9@.-]+` | 不含 `_`，保证前两段可无歧义拆分 |
+| `accountId` | `[A-Za-z0-9@.-]+` | 不含 `_`，同上 |
+| `peerId` | `[A-Za-z0-9_@.-]+`，末尾不能为 `.` | 允许 `_`，拒绝 Windows 路径末尾的点 |
 | 整体 | 仅上述 ASCII 字符 | 总长不超过 128 个字符 |
 
 大小写按原样保留，不做折叠；Windows 路径不区分大小写，仅大小写不同的 `peerId` 会落到同一个身份目录。无法计算 `bindingId` 的身份不会进入会话流程：core 在入站形态检查阶段以 `unavailable` 拒绝，`prepare` 返回 `creation-failed` 且不创建目录或 agent；QQ 侧的身份过滤见 [入站过滤](inbound.md#inbound-filter)。
@@ -41,7 +41,7 @@
 | `channelId` / `accountId` / `peerId` | 非空字符串；能重新拼出该键；字符集或长度不合法按身份错误拒绝 |
 | `sessionId` | UUID（8-4-4-4-12 位十六进制，大小写不敏感，不限定 UUID 版本）；同一文件内不得被两个记录共用 |
 | `generation` | 整数且不小于 1 |
-| `createdAt` / `updatedAt` | 受限 ISO 8601 日期时间形态，且能被 `Date.parse` 解析 |
+| `createdAt` / `updatedAt` | 受限 ISO 8601 日期或日期时间形态，且能被 `Date.parse` 解析 |
 | 未列出的字段 | 读取时忽略，下一次写事务按规范化结果序列化时丢弃 |
 
 主文件与 `.bak` 都使用 2 空格缩进的 UTF-8 JSON。手工编辑必须满足上表全部规则，否则启动被拒绝；`.bak` 保存上一份已提交快照，但加载只读主文件，主文件损坏时不会回退到 `.bak`。
@@ -66,7 +66,7 @@
 
 持久化失败或超时后事务 reject，store 进入 `failed`：保留最近已提交的内存快照，每个 `onFailed` 监听器恰好触发一次，后续事务直接拒绝。`failed` 是吸收态，没有自动恢复，只能重建 store。core 订阅该回调后转入 failed 并停止准入，后续入站以 `unavailable` 拒绝；就绪判定与状态迁移见 [健康、状态与日志](../observability.md#state-machines)，准入顺序见 [准入与入队](scheduling.md#ingress-admission)。
 
-`flushNow()` 等待在途事务与队列排空后返回，不产生新写入，也不等待超时后被放弃的底层 I/O。session flush 是另一条持久化路径：新建与重建在发布映射前要求 flush 返回 `true`，返回 `false`（无持久化监听者）、reject 或准备中止都阻止映射提交，且准备路径的 flush 没有单独超时，只受 turn 执行预算与中止信号约束；turn 发送前的最终 flush 另受 `SESSION_FLUSH_TIMEOUT_MS` 上限约束，超时、失败或无监听者按 fatal 处理（见 [turn 执行](scheduling.md#turn-runner)）。同一 session 的并发 flush 在宿主适配层复用同一个 in-flight Promise（见 [宿主接入](../architecture.md#host-integration)）。
+`flushNow()` 等待在途事务与队列排空后返回，不产生新写入，也不等待超时后被放弃的底层 I/O。session flush 是另一条持久化路径：新建与重建在发布映射前要求 flush 返回 `true`，返回 `false`（无持久化监听者）、reject 或 flush 等待期间中止都阻止映射提交；进入映射写事务后中止不会取消该事务，若事务成功则保留已提交映射。准备路径的 flush 没有单独超时，只受 turn 执行预算与中止信号约束；turn 发送前的最终 flush 另受 `SESSION_FLUSH_TIMEOUT_MS` 上限约束，超时、失败或无监听者按 fatal 处理（见 [turn 执行](scheduling.md#turn-runner)）。同一 session 的并发 flush 在宿主适配层复用同一个 in-flight Promise（见 [宿主接入](../architecture.md#host-integration)）。
 
 `revision` 是文档级计数，每次成功事务在已提交值上加一，与草稿内容是否变化无关。`generation` 是记录级重建计数：首次创建为 1，每次重建加一；缓存命中要求缓存条目的 `sessionId` 与 `generation` 同时等于映射。重建换用新 `sessionId`、保留 `createdAt`、刷新 `updatedAt`，旧 dsh 会话文件保留。
 
@@ -94,7 +94,7 @@ core 在 execute 开始时调用 `prepare({ identity, signal })`，准备与后�
 
 准备结果由 core 收尾：`creation-failed` 只影响本条入站（首次创建不留下映射，重建保留旧映射）并发送 `turn-failed`；`fatal` 使 core 转 failed 并发送 `state-unavailable`；`aborted` 在超过执行截止时发送 `turn-timeout`，停机中止不发送提示。提示文案、合并与排序见 [提示与顺序](outbound.md#notice-order)。
 
-重建成功时 `recreated=true` 随准备结果返回，core 把它传给 turn-runner，`session-recreated` 作为该入站唯一信封的第一条提示发送，之后不持久化，下一条消息不会重提。重建过且准备阶段耗尽执行预算时，core 直接发送 `session-recreated` 与 `turn-timeout` 的提示信封；未重建时只发 `turn-timeout`。
+重建成功时 `recreated=true` 随准备结果返回，core 把它传给 turn-runner，`session-recreated` 作为该入站唯一信封的第一条提示发送，之后不持久化，下一条消息不会重提。准备成功返回后若执行预算已耗尽，core 在 `recreated=true` 时发送 `session-recreated` 与 `turn-timeout`，否则只发送 `turn-timeout`。若中止在重建的映射事务提交期间或提交之后触发、而该事务已提交成功，提交返回后才观察到中止，准备返回 `aborted` 而不携带 `recreated`；执行截止时仅发送 `turn-timeout`，下一条消息也不会补发重建提示。
 
 <a id="lru-recycle"></a>
 
@@ -102,7 +102,7 @@ core 在 execute 开始时调用 `prepare({ identity, signal })`，准备与后�
 
 缓存是进程内按 `bindingId` 索引的 `Map`，条目保存 handle、`sessionId`、`generation`、busy 标志、最近使用时间（单调时钟）与 LRU 序号，状态为 `active`、`releasing` 或 `stuck`。缓存不落盘，进程重启后为空，下一条入站按映射恢复。`stats().liveHandles` 统计全部条目（含 releasing 与 stuck），`busyHandles` 统计 busy 条目。
 
-`maxLiveAgents` 同时是缓存条数上限和阻塞式准入上限（字段见 [配置字段](../config.md#config-fields)）。缓存已满时 prepare 先同步逐出 LRU 序号最小、状态为 `active` 且不 busy 的条目并异步释放；没有可逐出条目就等待容量事件或中止信号，中止返回 `aborted`。`releasing` 与 `stuck` 条目不可逐出。
+`maxLiveAgents` 是 prepare 检查当前缓存容量的阈值（字段见 [配置字段](../config.md#config-fields)）。缓存已满时 prepare 先同步逐出 LRU 序号最小、状态为 `active` 且不 busy 的条目并异步释放；没有可逐出条目就等待容量事件或中止信号，中止返回 `aborted`。准备中的异步创建或恢复不预留容量，不同身份并发 prepare 可以同时通过同一个空位并使缓存条数超过该值。`releasing` 与 `stuck` 条目不可逐出；逐出后仍在异步释放的 handle 不计入缓存条数。
 
 turn 以健康 handle 结束时 core 调用 `markIdle`：清 busy、刷新 TTL 与 LRU 序号并唤醒容量等待者；未知、已移除或已转 `releasing`/`stuck` 的 handle 是 no-op（仅 `active` 条目清 busy、刷新时间戳并唤醒容量等待者）。busy 条目不会被 LRU 逐出，也不会被空闲回收器释放。
 
@@ -112,7 +112,7 @@ turn 以健康 handle 结束时 core 调用 `markIdle`：清 busy、刷新 TTL �
 
 返回 `timeout` 的缓存条目转 `stuck` 并记录 `manual_restart_required`，之后不再复用、不再重复释放，但仍计入 `liveHandles` 并占用缓存名额。`dispose` 成功而 `isAgentLive` 仍为 `true` 同样按未收敛处理并转 `stuck`。只有释放成功且 session 已退出 live registry 才移除条目并唤醒容量等待者。被 LRU 逐出的空闲 handle 在释放超时时记 `manual_restart_required`，dispose 结束后仍 live 记告警；因映射不一致被移除的旧 handle 只在释放超时时记 `manual_restart_required`。这两条路径都没有缓存条目可标记。
 
-handle 的所有权属于 session-manager，从 `createAgent`/`resumeAgent` 返回起保存到异步 `dispose` 结束；`isAgentLive` 只用于释放收敛判定，释放统一走 `releaseHandle` 的预算序列。准备中止或失败时，已取得但未发布的 handle 在 `DISPOSE_WAIT_MS` 内尽力 dispose，不发布进缓存；映射若已提交则保留，下一次入站按映射恢复。
+handle 的所有权属于 session-manager，从 `createAgent`/`resumeAgent` 返回起保存到异步 `dispose` 结束；`isAgentLive` 只用于释放收敛判定。缓存条目的释放与逐出使用上述预算序列；准备中止或失败、恢复的 cwd 不匹配时，已取得但未发布的 handle 直接在 `DISPOSE_WAIT_MS` 内尽力 dispose，不等待释放结束，也不发布进缓存；映射若已提交则保留，下一次入站按映射恢复。
 
 停机时 core 先停止回收器，再枚举缓存中的全部 handle（含 releasing 与 stuck）逐个调用 `releaseHandle`，每项使用剩余的停机预算，`stuck` 条目立即返回 `timeout`。随后 `store.flushNow()` 排空状态写事务，整体受停机总预算约束，超限记录 `manual_restart_required`（预算常量见 [固定行为常量](../config.md#gateway-limits)）。
 

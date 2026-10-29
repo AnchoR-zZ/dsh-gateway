@@ -107,7 +107,7 @@ turn-runner 的主流程按以下顺序推进，并且只允许一个终态路�
 | `max-tokens`：最终文本为空 | 不发送正文 | `empty-reply` |
 | `error`、`blocked`、`aborted`、`interrupted`、`forked` 或未知 kind | 不发送正文 | `turn-failed` |
 
-每个回复信封携带可选的 `text`、`notices` 与 `maxMessages`；`maxMessages` 原样来自入站的 `replyPolicy`，core 不放大。准备阶段重建过会话时，`session-recreated` 始终是 `notices` 的第一项；提示的合并、排序与文案由回复规划负责（见 [提示与顺序](outbound.md#notice-order)）。
+每个回复信封携带可选的 `text`、`notices` 与 `maxMessages`；`maxMessages` 原样来自入站的 `replyPolicy`，core 不放大。准备成功返回 `recreated=true` 时，若本次产生回复信封，`session-recreated` 是 `notices` 的第一项；重建期间被中止但映射事务提交成功的例外见 [会话准备](session-state.md#prepare)。提示的合并、排序与文案由回复规划负责（见 [提示与顺序](outbound.md#notice-order)）。
 
 handle 健康度与 turn 成败解耦：`turn/end` 为 `error`、`blocked` 等失败原因时，只要停稳且 flush 成功，handle 仍标记为可复用并交回缓存；超时路径停稳且 flush 成功时同样可复用，flush 未成功或未停稳则标记为需释放。`healthy` 的 handle 交回 [缓存与回收](session-state.md#lru-recycle)，`needs-release` 的 handle 进入下述清理预算。
 
@@ -131,7 +131,7 @@ turn-runner 在正常结果、超时、fatal 与运行契约异常路径各调�
 
 `needs-release` 的 handle 由 core 交给会话管理层做有界释放。释放预算取取消清理总预算 `CANCEL_CLEANUP_BUDGET_MS`（10,000 ms）与"截止点 + 该预算 - 当前时刻"的较小值，停稳、flush 与 dispose 共用该预算且不按步骤追加；晚于截止点的终态因此只剩扣除已超时部分后的预算。
 
-释放返回 `timeout` 时 core 转 failed 并停止准入，需要人工重启；释放序列与 stuck 处理见 [缓存与回收](session-state.md#lru-recycle)。所有超时、取消与清理预算的常量值见 [固定行为常量](../config.md#gateway-limits)。
+释放返回 `timeout` 时 core 转 failed 并停止准入，需要人工重启；core 为此记一条 `turn_failed`，转 failed 时再记 `state_failed` 与 core 的 `manual_restart_required`，会话管理器在条目转 `stuck` 时另记一条 `manual_restart_required`，但该路径不产生回复信封，用户这条消息得不到失败提示，只有后续新入站才会收到 `state-unavailable` 拒绝提示。释放序列与 stuck 处理见 [缓存与回收](session-state.md#lru-recycle)。所有超时、取消与清理预算的常量值见 [固定行为常量](../config.md#gateway-limits)。
 
 <a id="known-gaps"></a>
 
